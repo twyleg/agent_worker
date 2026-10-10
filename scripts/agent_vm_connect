@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/agent_vm_common"
+# Usage: agent_vm_connect [REMOTE_COMMAND ...]
+
+[[ -r "$SSH_KEY" ]] || die "Dedicated SSH key not found: $SSH_KEY. Check STATE_DIR or create the VM first."
+vm_virsh_read dominfo "$VM_NAME" >/dev/null
+ip="$(vm_ip)" || die "No guest IP found for '$VM_NAME'. Check: agent_vm_status"
+exec ssh -i "$SSH_KEY" \
+  -o IdentitiesOnly=yes \
+  -o BatchMode=yes \
+  -o ConnectTimeout=5 \
+  -o StrictHostKeyChecking=accept-new \
+  -o "UserKnownHostsFile=$KNOWN_HOSTS" \
+  "${AGENT_USER}@${ip}" "$@"

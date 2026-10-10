@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-# Zero-touch disposable Xubuntu VM for Codex on an Arch Linux host.
+# Report unexpected failures without printing commands that may contain secrets.
+trap 'status=$?; printf "ERROR: %s failed at line %s (exit status %s).\n" "${BASH_SOURCE[0]}" "$LINENO" "$status" >&2; exit "$status"' ERR
+
+# Zero-touch disposable Xubuntu VM for coding agents on an Arch Linux host.
 #
 # This script:
 #   * installs the required Arch/libvirt tooling
@@ -13,14 +16,15 @@ set -euo pipefail
 #   * waits for cloud-init provisioning to finish
 #
 # Nothing from the host is shared with the guest by default. Use
-# share-project.sh to expose one selected project afterwards.
+# agent_vm_mount_project to expose one selected project afterwards.
 #
 # Usage:
-#   ./create-codex-vm.sh
-#   ./create-codex-vm.sh --recreate
+#   agent_vm_create
+#   agent_vm_create --recreate
 #
 # Optional environment overrides:
-#   VM_NAME=codex-xubuntu
+#   DATA_DIR=/absolute/path/to/vm-data
+#   VM_NAME=agent-xubuntu
 #   RAM_MB=12288
 #   VCPUS=6
 #   DISK_GB=64
@@ -29,7 +33,12 @@ set -euo pipefail
 #   LOCALE=en_US.UTF-8
 #   KEYBOARD_LAYOUT=de
 
-VM_NAME="${VM_NAME:-codex-xubuntu}"
+# Keep runtime data at the project root, even when invoked from another directory.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+DATA_DIR="$(realpath -m -- "${DATA_DIR:-$PROJECT_DIR/.data}")"
+
+VM_NAME="${VM_NAME:-agent-xubuntu}"
 RAM_MB="${RAM_MB:-12288}"
 VCPUS="${VCPUS:-6}"
 DISK_GB="${DISK_GB:-64}"
@@ -38,19 +47,21 @@ TIMEZONE="${TIMEZONE:-Europe/Berlin}"
 LOCALE="${LOCALE:-en_US.UTF-8}"
 KEYBOARD_LAYOUT="${KEYBOARD_LAYOUT:-de}"
 KEYBOARD_VARIANT="${KEYBOARD_VARIANT:-}"
-CODEX_USER="${CODEX_USER:-codex}"
-GUEST_HOSTNAME="${GUEST_HOSTNAME:-codex-vm}"
+SHARE_TAG="${AGENT_SHARE_TAG:-${CODEX_SHARE_TAG:-agent-project}}"
+AGENT_USER="${AGENT_USER:-${CODEX_USER:-agent}}"
+WORKSPACE_HELPER_PREFIX="${WORKSPACE_HELPER_PREFIX:-agent-workspace}"
+GUEST_HOSTNAME="${GUEST_HOSTNAME:-agent-vm}"
 LIBVIRT_URI="${LIBVIRT_URI:-qemu:///system}"
-IMAGE_DIR="${IMAGE_DIR:-/var/lib/libvirt/images/codex-vm}"
+IMAGE_DIR="${IMAGE_DIR:-$DATA_DIR/images}"
 ISO_DIR="$IMAGE_DIR/iso"
 DISK_PATH="$IMAGE_DIR/${VM_NAME}.qcow2"
 RELEASE_URL="https://cdimage.ubuntu.com/xubuntu/releases/${XUBUNTU_SERIES}/release"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-vm"
+STATE_DIR="${STATE_DIR:-$DATA_DIR/state}"
 SEED_DIR="$STATE_DIR/autoinstall"
 SSH_KEY="$STATE_DIR/id_ed25519"
 KNOWN_HOSTS="$STATE_DIR/known_hosts"
 PASSWORD_FILE="$STATE_DIR/${VM_NAME}.password"
-EXPORT_DIR="${CODEX_EXPORT_DIR:-/var/lib/libvirt/codex-share/current}"
+EXPORT_DIR="${AGENT_EXPORT_DIR:-${CODEX_EXPORT_DIR:-$DATA_DIR/share/current}}"
 SHARE_STATE_XML="$STATE_DIR/current-share.xml"
 SHARE_STATE_PATH="$STATE_DIR/current-share.path"
 READY_TIMEOUT="${READY_TIMEOUT:-900}"
@@ -123,7 +134,11 @@ XML
   fi
 
   sudo virsh -c "$LIBVIRT_URI" net-autostart default >/dev/null
-  if ! sudo virsh -c "$LIBVIRT_URI" net-info default | grep -qE '^Active:[[:space:]]+yes$'; then
+  # Network names are not localized, unlike the labels/values in net-info.
+  # Capture first so grep's early exit cannot cause a pipefail/SIGPIPE failure.
+  local active_networks
+  active_networks="$(sudo virsh -c "$LIBVIRT_URI" net-list --name)"
+  if ! grep -Fxq default <<<"$active_networks"; then
     sudo virsh -c "$LIBVIRT_URI" net-start default >/dev/null
   fi
 }
@@ -170,7 +185,7 @@ ensure_vm_ssh_key() {
 
   if [[ ! -f "$SSH_KEY" ]]; then
     log "Creating dedicated SSH key for the disposable VM"
-    ssh-keygen -q -t ed25519 -N '' -C 'codex-vm' -f "$SSH_KEY"
+    ssh-keygen -q -t ed25519 -N '' -C 'agent-vm' -f "$SSH_KEY"
   fi
   chmod 0600 "$SSH_KEY"
 }
@@ -210,7 +225,7 @@ autoinstall:
   timezone: ${TIMEZONE}
   identity:
     hostname: ${GUEST_HOSTNAME}
-    username: ${CODEX_USER}
+    username: ${AGENT_USER}
     password: '${PASSWORD_HASH}'
   ssh:
     install-server: true
@@ -263,46 +278,52 @@ autoinstall:
     ssh_pwauth: false
     disable_root: true
     write_files:
-      - path: /etc/sudoers.d/90-${CODEX_USER}
+      - path: /etc/sudoers.d/90-${AGENT_USER}
         owner: root:root
         permissions: '0440'
         content: |
-          ${CODEX_USER} ALL=(ALL:ALL) NOPASSWD: ALL
-      - path: /usr/local/bin/codex-workspace-mount
+          ${AGENT_USER} ALL=(ALL:ALL) NOPASSWD: ALL
+      - path: /usr/local/bin/${WORKSPACE_HELPER_PREFIX}-mount
         owner: root:root
         permissions: '0755'
         content: |
           #!/usr/bin/env bash
           set -euo pipefail
-          MOUNTPOINT="/home/${CODEX_USER}/workspace"
-          TAG="codex-project"
+          WORKSPACE="/home/${AGENT_USER}/workspace"
+          PROJECT_NAME="\${1:?Usage: $WORKSPACE_HELPER_PREFIX PROJECT_DIR_NAME}"
+          [[ "\$PROJECT_NAME" != */* && "\$PROJECT_NAME" != . && "\$PROJECT_NAME" != .. ]] || { echo 'Invalid project directory name' >&2; exit 1; }
+          MOUNTPOINT="\$WORKSPACE/\$PROJECT_NAME"
+          TAG="${SHARE_TAG}"
           mkdir -p "\$MOUNTPOINT"
-          if findmnt -rn -T "\$MOUNTPOINT" -t virtiofs >/dev/null 2>&1; then
+          if findmnt -rn -M "\$MOUNTPOINT" -t virtiofs >/dev/null 2>&1; then
             echo "Already mounted: \$MOUNTPOINT"
             exit 0
           fi
           mount -t virtiofs "\$TAG" "\$MOUNTPOINT"
           echo "Mounted \$TAG at \$MOUNTPOINT"
-      - path: /usr/local/bin/codex-workspace-unmount
+      - path: /usr/local/bin/${WORKSPACE_HELPER_PREFIX}-unmount
         owner: root:root
         permissions: '0755'
         content: |
           #!/usr/bin/env bash
           set -euo pipefail
-          MOUNTPOINT="/home/${CODEX_USER}/workspace"
-          if findmnt -rn -T "\$MOUNTPOINT" -t virtiofs >/dev/null 2>&1; then
+          WORKSPACE="/home/${AGENT_USER}/workspace"
+          PROJECT_NAME="\${1:?Usage: $WORKSPACE_HELPER_PREFIX PROJECT_DIR_NAME}"
+          [[ "\$PROJECT_NAME" != */* && "\$PROJECT_NAME" != . && "\$PROJECT_NAME" != .. ]] || { echo 'Invalid project directory name' >&2; exit 1; }
+          MOUNTPOINT="\$WORKSPACE/\$PROJECT_NAME"
+          if findmnt -rn -M "\$MOUNTPOINT" -t virtiofs >/dev/null 2>&1; then
             umount "\$MOUNTPOINT"
             echo "Unmounted \$MOUNTPOINT"
           else
             echo "Not mounted: \$MOUNTPOINT"
           fi
     runcmd:
-      - [mkdir, -p, /home/${CODEX_USER}/workspace]
-      - [chown, '${CODEX_USER}:${CODEX_USER}', /home/${CODEX_USER}/workspace]
+      - [mkdir, -p, /home/${AGENT_USER}/workspace]
+      - [chown, '${AGENT_USER}:${AGENT_USER}', /home/${AGENT_USER}/workspace]
       - [bash, -lc, "command -v fdfind >/dev/null && ln -sf /usr/bin/fdfind /usr/local/bin/fd || true"]
       - [systemctl, enable, --now, qemu-guest-agent.service]
       - [npm, install, -g, '@openai/codex@latest']
-      - [bash, -lc, "echo 'Codex VM provisioning complete' > /var/lib/codex-vm-ready"]
+      - [bash, -lc, "echo 'Agent VM provisioning complete' > /var/lib/agent-vm-ready"]
 EOF2
 
   cat >"$SEED_DIR/meta-data" <<EOF2
@@ -341,12 +362,14 @@ remove_existing_vm() {
     sudo rm -f "$DISK_PATH"
   fi
 
-  [[ $RECREATE -eq 1 ]] && cleanup_stale_share
+  if [[ $RECREATE -eq 1 ]]; then
+    cleanup_stale_share
+  fi
 }
 
 create_and_install_vm() {
   sudo install -d -m 0755 "$IMAGE_DIR"
-  sudo install -d -m 0755 /var/lib/libvirt/codex-share/current
+  sudo install -d -m 0755 "$EXPORT_DIR"
 
   log "Creating '$VM_NAME' and starting unattended Xubuntu installation"
   log "Installer progress is available with: sudo virsh console $VM_NAME"
@@ -389,7 +412,7 @@ vm_mac() {
 find_vm_ip() {
   local ip mac
   ip="$(sudo virsh -c "$LIBVIRT_URI" domifaddr "$VM_NAME" --source agent 2>/dev/null \
-        | awk '/ipv4/ {sub(/\/.*/, "", $4); print $4; exit}')"
+        | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); if ($4 !~ /^(127\.|0\.|169\.254\.)/) {print $4; exit}}')"
   if [[ -n "$ip" ]]; then
     printf '%s\n' "$ip"
     return 0
@@ -406,18 +429,22 @@ find_vm_ip() {
 
 wait_for_guest() {
   log "Waiting for the installed guest and first-boot provisioning"
-  local deadline ip=""
+  local deadline ip="" last_ip="" ssh_error=""
   deadline=$((SECONDS + READY_TIMEOUT))
 
   while (( SECONDS < deadline )); do
     ip="$(find_vm_ip || true)"
     if [[ -n "$ip" ]]; then
-      if ssh -i "$SSH_KEY" \
+      if [[ "$ip" != "$last_ip" ]]; then
+        log "Guest IP discovered: $ip; waiting for SSH as $AGENT_USER"
+        last_ip="$ip"
+      fi
+      if ssh_error="$(ssh -i "$SSH_KEY" \
           -o BatchMode=yes \
           -o ConnectTimeout=3 \
           -o StrictHostKeyChecking=accept-new \
           -o "UserKnownHostsFile=$KNOWN_HOSTS" \
-          "${CODEX_USER}@${ip}" true >/dev/null 2>&1; then
+          "${AGENT_USER}@${ip}" true 2>&1)"; then
         break
       fi
     fi
@@ -426,7 +453,8 @@ wait_for_guest() {
 
   [[ -n "$ip" ]] || die "VM booted but no IP address was discovered. Check: sudo virsh console $VM_NAME"
   if (( SECONDS >= deadline )); then
-    die "VM did not become reachable over SSH. Check: sudo virsh console $VM_NAME"
+    printf 'Last SSH failure: %s\n' "$ssh_error" >&2
+    die "VM did not become reachable over SSH at ${AGENT_USER}@${ip}. Check: sudo virsh console $VM_NAME"
   fi
 
   log "VM reachable at $ip; waiting for cloud-init"
@@ -434,9 +462,9 @@ wait_for_guest() {
       -o BatchMode=yes \
       -o StrictHostKeyChecking=accept-new \
       -o "UserKnownHostsFile=$KNOWN_HOSTS" \
-      "${CODEX_USER}@${ip}" 'sudo cloud-init status --wait'; then
+      "${AGENT_USER}@${ip}" 'sudo cloud-init status --wait'; then
     echo "WARNING: cloud-init reported an error. Inspect with:" >&2
-    echo "  ssh -i '$SSH_KEY' ${CODEX_USER}@${ip} 'sudo cloud-init status --long; sudo journalctl -u cloud-final'" >&2
+    echo "  ssh -i '$SSH_KEY' ${AGENT_USER}@${ip} 'sudo cloud-init status --long; sudo journalctl -u cloud-final'" >&2
     return 1
   fi
 
@@ -449,17 +477,17 @@ print_summary() {
     -o BatchMode=yes \
     -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=$KNOWN_HOSTS" \
-    "${CODEX_USER}@${VM_IP}" 'codex --version 2>/dev/null || echo not-installed')"
+    "${AGENT_USER}@${VM_IP}" 'codex --version 2>/dev/null || echo not-installed')"
 
   cat <<EOF2
 
 ============================================================
-Codex VM is ready
+Agent VM is ready
 ============================================================
 
 VM:             $VM_NAME
 IP:             $VM_IP
-User:           $CODEX_USER
+User:           $AGENT_USER
 Codex:          $codex_version
 GUI password:   $(cat "$PASSWORD_FILE")
 SSH key:        $SSH_KEY
@@ -467,7 +495,7 @@ SSH key:        $SSH_KEY
 SSH:
   ssh -i "$SSH_KEY" \\
     -o UserKnownHostsFile="$KNOWN_HOSTS" \\
-    ${CODEX_USER}@${VM_IP}
+    ${AGENT_USER}@${VM_IP}
 
 Graphical console:
   sudo virt-viewer --connect "$LIBVIRT_URI" "$VM_NAME"
@@ -476,13 +504,21 @@ Authenticate Codex once inside the VM:
   codex
 
 Then expose one project from the host:
-  ./share-project.sh attach ~/dev/workspace/my-project
+  agent_vm_mount_project attach ~/dev/workspace/my-project
 
 Nothing from the host is shared with the VM until you explicitly attach a
 project. The VM has no access to your host SSH keys or home directory.
 EOF2
 }
 
+# Create the common parent as the invoking user before sudo creates images/.
+source "$SCRIPT_DIR/lib/agent_vm_sudo_session"
+trap stop_sudo_session EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+log "Authorizing sudo for unattended setup (refreshed until the script exits)"
+start_sudo_session
+mkdir -p "$DATA_DIR"
 install_arch_packages
 ensure_libvirt
 download_iso

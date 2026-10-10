@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Optional repair/update helper for an already installed Agent VM.
+# Fresh VMs created by agent_vm_create are provisioned automatically and do
+# not require this script.
+#
+# Run inside the VM:
+#   sudo bash agent_vm_setup_guest
+
+AGENT_USER="${AGENT_USER:-${CODEX_USER:-agent}}"
+WORKSPACE_HELPER_PREFIX="${WORKSPACE_HELPER_PREFIX:-agent-workspace}"
+WORKSPACE="/home/${AGENT_USER}/workspace"
+VIRTIOFS_TAG="${AGENT_SHARE_TAG:-${CODEX_SHARE_TAG:-agent-project}}"
+
+log() { printf '\n==> %s\n' "$*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "Run this script with sudo/root."
+id "$AGENT_USER" >/dev/null 2>&1 || die "User '$AGENT_USER' does not exist."
+
+export DEBIAN_FRONTEND=noninteractive
+
+log "Updating package metadata"
+apt-get update
+
+log "Installing/updating development and GUI-test packages"
+apt-get install -y \
+  sudo ca-certificates curl wget gnupg git git-lfs build-essential pkg-config \
+  cmake ninja-build jq ripgrep fd-find file tree less vim unzip zip rsync \
+  python3 python3-pip python3-venv pipx nodejs npm openjdk-21-jdk \
+  xvfb xauth x11-utils dbus-x11 weston mesa-utils xdg-utils \
+  qemu-guest-agent spice-vdagent
+
+log "Ensuring passwordless sudo"
+printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$AGENT_USER" >"/etc/sudoers.d/90-${AGENT_USER}"
+chmod 0440 "/etc/sudoers.d/90-${AGENT_USER}"
+visudo -cf "/etc/sudoers.d/90-${AGENT_USER}" >/dev/null
+
+log "Preparing workspace"
+install -d -m 0755 -o "$AGENT_USER" -g "$(id -gn "$AGENT_USER")" "$WORKSPACE"
+if command -v fdfind >/dev/null 2>&1; then
+  ln -sf /usr/bin/fdfind /usr/local/bin/fd
+fi
+
+cat >"/usr/local/bin/${WORKSPACE_HELPER_PREFIX}-mount" <<EOF2
+#!/usr/bin/env bash
+set -euo pipefail
+WORKSPACE="$WORKSPACE"
+PROJECT_NAME="\${1:?Usage: $WORKSPACE_HELPER_PREFIX PROJECT_DIR_NAME}"
+[[ "\$PROJECT_NAME" != */* && "\$PROJECT_NAME" != . && "\$PROJECT_NAME" != .. ]] || { echo 'Invalid project directory name' >&2; exit 1; }
+MOUNTPOINT="\$WORKSPACE/\$PROJECT_NAME"
+TAG="$VIRTIOFS_TAG"
+mkdir -p "\$MOUNTPOINT"
+if findmnt -rn -M "\$MOUNTPOINT" -t virtiofs >/dev/null 2>&1; then
+  echo "Already mounted: \$MOUNTPOINT"
+  exit 0
+fi
+mount -t virtiofs "\$TAG" "\$MOUNTPOINT"
+echo "Mounted \$TAG at \$MOUNTPOINT"
+EOF2
+chmod 0755 "/usr/local/bin/${WORKSPACE_HELPER_PREFIX}-mount"
+
+cat >"/usr/local/bin/${WORKSPACE_HELPER_PREFIX}-unmount" <<EOF2
+#!/usr/bin/env bash
+set -euo pipefail
+WORKSPACE="$WORKSPACE"
+PROJECT_NAME="\${1:?Usage: $WORKSPACE_HELPER_PREFIX PROJECT_DIR_NAME}"
+[[ "\$PROJECT_NAME" != */* && "\$PROJECT_NAME" != . && "\$PROJECT_NAME" != .. ]] || { echo 'Invalid project directory name' >&2; exit 1; }
+MOUNTPOINT="\$WORKSPACE/\$PROJECT_NAME"
+if findmnt -rn -M "\$MOUNTPOINT" -t virtiofs >/dev/null 2>&1; then
+  umount "\$MOUNTPOINT"
+  echo "Unmounted \$MOUNTPOINT"
+else
+  echo "Not mounted: \$MOUNTPOINT"
+fi
+EOF2
+chmod 0755 "/usr/local/bin/${WORKSPACE_HELPER_PREFIX}-unmount"
+
+log "Installing/updating Codex CLI"
+npm install -g @openai/codex@latest
+
+systemctl enable --now qemu-guest-agent.service || true
+
+log "Guest toolchain ready"
+codex --version || true

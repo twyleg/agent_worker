@@ -1,0 +1,30 @@
+# Shared settings and read-only discovery for the host management commands.
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+DATA_DIR="$(realpath -m -- "${DATA_DIR:-$PROJECT_DIR/.data}")"
+VM_NAME="${VM_NAME:-agent-xubuntu}"
+AGENT_USER="${AGENT_USER:-${CODEX_USER:-agent}}"
+LIBVIRT_URI="${LIBVIRT_URI:-qemu:///system}"
+STATE_DIR="${STATE_DIR:-$DATA_DIR/state}"
+SSH_KEY="$STATE_DIR/id_ed25519"
+KNOWN_HOSTS="$STATE_DIR/known_hosts"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+vm_virsh() { sudo env LC_ALL=C virsh -c "$LIBVIRT_URI" "$@"; }
+vm_virsh_read() { env LC_ALL=C virsh --readonly -c "$LIBVIRT_URI" "$@"; }
+
+vm_ip() {
+  local addresses ip interfaces mac leases
+  addresses="$(vm_virsh_read domifaddr "$VM_NAME" --source agent 2>/dev/null || true)"
+  ip="$(awk '$3 == "ipv4" {sub(/\/.*/, "", $4); if ($4 !~ /^(127\.|0\.|169\.254\.)/) {print $4; exit}}' <<<"$addresses")"
+  if [[ -n "$ip" ]]; then
+    printf '%s\n' "$ip"
+    return 0
+  fi
+  interfaces="$(vm_virsh_read domiflist "$VM_NAME")" || return
+  mac="$(awk '$2 == "network" {print $5; exit}' <<<"$interfaces")"
+  [[ -n "$mac" ]] || return 1
+  leases="$(vm_virsh_read net-dhcp-leases default)" || return
+  ip="$(awk -v m="$mac" 'tolower($3)==tolower(m) && $4 == "ipv4" {sub(/\/.*/, "", $5); if ($5 !~ /^(127\.|0\.|169\.254\.)/) {print $5; exit}}' <<<"$leases")"
+  [[ -n "$ip" ]] || return 1
+  printf '%s\n' "$ip"
+}

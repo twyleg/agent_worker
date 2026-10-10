@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/agent_vm_common"
+[[ $# -eq 0 ]] || die "Usage: agent_vm_shutdown"
+
+state="$(vm_virsh domstate "$VM_NAME")"
+if [[ "$state" == 'shut off' ]]; then
+  echo "VM '$VM_NAME' is already shut off."
+  exit 0
+fi
+vm_virsh shutdown "$VM_NAME"
+echo "Graceful shutdown requested. Check completion with: agent_vm_status"

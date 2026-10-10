@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Query the guest's Codex account without copying its credentials to the host.
+case "${1:-}" in
+  '') [[ $# -eq 0 ]] || exit 2 ;;
+  --json) [[ $# -eq 1 ]] || exit 2 ;;
+  -h|--help)
+    echo 'Usage: agent_vm_codex_usage [--json]'
+    echo 'Read live Codex usage for the ChatGPT account signed in inside the VM.'
+    exit 0 ;;
+  *) echo 'Usage: agent_vm_codex_usage [--json]' >&2; exit 2 ;;
+esac
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+exec "$SCRIPT_DIR/agent_vm_connect" python3 - "$@" < "$SCRIPT_DIR/lib/codex_usage.py"

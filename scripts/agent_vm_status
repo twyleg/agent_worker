@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/lib/agent_vm_common"
+[[ $# -eq 0 ]] || die "Usage: agent_vm_status"
+
+# Preserve libvirt's error when the VM is undefined or the connection fails.
+vm_virsh_read dominfo "$VM_NAME"
+ip="$(vm_ip || true)"
+printf '\nGuest IP:      %s\nGuest user:    %s\nData directory: %s\n' "${ip:-unavailable}" "$AGENT_USER" "$DATA_DIR"
+if [[ -f "$STATE_DIR/current-share.path" ]]; then
+  project="$(cat "$STATE_DIR/current-share.path")"
+  printf 'Host project:  %s\nGuest project: /home/%s/workspace/%s\n' "$project" "$AGENT_USER" "$(basename -- "$project")"
+else
+  echo 'Host project:  none attached'
+fi

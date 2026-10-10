@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VM_NAME="${VM_NAME:-codex-xubuntu}"
+# Keep runtime data at the project root, even when invoked from another directory.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+DATA_DIR="$(realpath -m -- "${DATA_DIR:-$PROJECT_DIR/.data}")"
+
+VM_NAME="${VM_NAME:-agent-xubuntu}"
 LIBVIRT_URI="${LIBVIRT_URI:-qemu:///system}"
-IMAGE_DIR="${IMAGE_DIR:-/var/lib/libvirt/images/codex-vm}"
+IMAGE_DIR="${IMAGE_DIR:-$DATA_DIR/images}"
 DISK_PATH="$IMAGE_DIR/${VM_NAME}.qcow2"
-EXPORT_DIR="${CODEX_EXPORT_DIR:-/var/lib/libvirt/codex-share/current}"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-vm"
+EXPORT_DIR="${AGENT_EXPORT_DIR:-${CODEX_EXPORT_DIR:-$DATA_DIR/share/current}}"
+STATE_DIR="${STATE_DIR:-$DATA_DIR/state}"
 STATE_XML="$STATE_DIR/current-share.xml"
 STATE_PATH="$STATE_DIR/current-share.path"
 

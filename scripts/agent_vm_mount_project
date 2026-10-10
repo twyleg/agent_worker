@@ -1,21 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hot-plug exactly one host project into the running Codex VM via virtiofs.
+# Hot-plug exactly one host project into the running Agent VM via virtiofs.
 # The helper also mounts/unmounts the filesystem inside the guest over the
-# dedicated SSH key created by create-codex-vm.sh.
+# dedicated SSH key created by agent_vm_create.
 #
 # Usage:
-#   ./share-project.sh attach /path/to/project
-#   ./share-project.sh status
-#   ./share-project.sh detach
+#   agent_vm_mount_project attach /path/to/project
+#   agent_vm_mount_project status
+#   agent_vm_mount_project detach
 
-VM_NAME="${VM_NAME:-codex-xubuntu}"
-CODEX_USER="${CODEX_USER:-codex}"
+# Keep runtime data at the project root, even when invoked from another directory.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+DATA_DIR="$(realpath -m -- "${DATA_DIR:-$PROJECT_DIR/.data}")"
+
+VM_NAME="${VM_NAME:-agent-xubuntu}"
+AGENT_USER="${AGENT_USER:-${CODEX_USER:-agent}}"
+WORKSPACE_HELPER_PREFIX="${WORKSPACE_HELPER_PREFIX:-agent-workspace}"
 LIBVIRT_URI="${LIBVIRT_URI:-qemu:///system}"
-TAG="${CODEX_SHARE_TAG:-codex-project}"
-EXPORT_DIR="${CODEX_EXPORT_DIR:-/var/lib/libvirt/codex-share/current}"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/codex-vm"
+TAG="${AGENT_SHARE_TAG:-${CODEX_SHARE_TAG:-agent-project}}"
+EXPORT_DIR="${AGENT_EXPORT_DIR:-${CODEX_EXPORT_DIR:-$DATA_DIR/share/current}}"
+STATE_DIR="${STATE_DIR:-$DATA_DIR/state}"
 STATE_XML="$STATE_DIR/current-share.xml"
 STATE_PATH="$STATE_DIR/current-share.path"
 SSH_KEY="$STATE_DIR/id_ed25519"
@@ -42,7 +48,7 @@ vm_mac() {
 vm_ip() {
   local ip mac
   ip="$(sudo virsh -c "$LIBVIRT_URI" domifaddr "$VM_NAME" --source agent 2>/dev/null \
-        | awk '/ipv4/ {sub(/\/.*/, "", $4); print $4; exit}')"
+        | awk '$3 == "ipv4" {sub(/\/.*/, "", $4); if ($4 !~ /^(127\.|0\.|169\.254\.)/) {print $4; exit}}')"
   if [[ -n "$ip" ]]; then
     printf '%s\n' "$ip"
     return 0
@@ -59,11 +65,58 @@ guest_ssh() {
   ip="$(vm_ip || true)"
   [[ -n "$ip" ]] || return 1
   ssh -i "$SSH_KEY" \
+    -o IdentitiesOnly=yes \
     -o BatchMode=yes \
     -o ConnectTimeout=5 \
     -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=$KNOWN_HOSTS" \
-    "${CODEX_USER}@${ip}" "$@"
+    "${AGENT_USER}@${ip}" "$@"
+}
+
+project_mountpoint() {
+  local project_name
+  project_name="$(basename -- "$1")"
+  [[ "$project_name" != / && "$project_name" != . && "$project_name" != .. ]] || die "Invalid project directory name."
+  printf '/home/%s/workspace/%s\n' "$AGENT_USER" "$project_name"
+}
+
+# Run the mount operations directly so already-created guests do not need their
+# older workspace helper scripts replaced before using project subdirectories.
+mount_guest_project() {
+  local command
+  printf -v command 'sudo bash -s -- %q %q %q' "$1" "$TAG" "/home/$AGENT_USER/workspace"
+  guest_ssh "$command" <<'GUEST'
+set -euo pipefail
+mountpoint=$1
+tag=$2
+workspace=$3
+if findmnt -rn -M "$workspace" -t virtiofs >/dev/null; then
+  echo "A legacy share is mounted at $workspace; detach it first." >&2
+  exit 1
+fi
+mkdir -p "$mountpoint"
+if findmnt -rn -M "$mountpoint" -t virtiofs >/dev/null; then
+  echo "Already mounted: $mountpoint"
+else
+  mount -t virtiofs "$tag" "$mountpoint"
+  echo "Mounted $tag at $mountpoint"
+fi
+GUEST
+}
+
+unmount_guest_project() {
+  local command
+  printf -v command 'sudo bash -s -- %q %q' "$1" "/home/$AGENT_USER/workspace"
+  guest_ssh "$command" <<'GUEST'
+set -euo pipefail
+# The second path supports detaching shares made with the old flat layout.
+for mountpoint in "$1" "$2"; do
+  if findmnt -rn -M "$mountpoint" -t virtiofs >/dev/null; then
+    umount "$mountpoint"
+    echo "Unmounted $mountpoint"
+  fi
+done
+GUEST
 }
 
 write_xml() {
@@ -84,6 +137,7 @@ case "${1:-}" in
 
     project="$(realpath -e "$2")"
     [[ -d "$project" ]] || die "Not a directory: $project"
+    guest_path="$(project_mountpoint "$project")"
 
     sudo install -d -m 0755 "$EXPORT_DIR"
     export_is_mounted && die "$EXPORT_DIR is already a mount point. Clean it up before attaching another project."
@@ -102,16 +156,17 @@ case "${1:-}" in
     fi
 
     log "Mounting project inside the guest"
-    if guest_ssh 'sudo /usr/local/bin/codex-workspace-mount'; then
-      echo "Ready: $project -> /home/${CODEX_USER}/workspace"
+    if mount_guest_project "$guest_path"; then
+      echo "Ready: $project -> $guest_path"
     else
+      printf -v manual_mount 'sudo mkdir -p %q && sudo mount -t virtiofs %q %q' "$guest_path" "$TAG" "$guest_path"
       cat <<EOF2
 The virtiofs device is attached, but automatic guest mounting failed.
 Inside the VM run:
-  sudo codex-workspace-mount
+  $manual_mount
 
 The project will then be available at:
-  /home/${CODEX_USER}/workspace
+  $guest_path
 EOF2
     fi
     ;;
@@ -121,7 +176,8 @@ EOF2
     [[ -f "$STATE_XML" ]] || die "No tracked project share is attached."
 
     log "Unmounting project inside the guest"
-    if ! guest_ssh 'sudo /usr/local/bin/codex-workspace-unmount'; then
+    guest_path="$(project_mountpoint "$(cat "$STATE_PATH")")"
+    if ! unmount_guest_project "$guest_path"; then
       die "Could not unmount the project inside the guest. Ensure it is not in use, then retry."
     fi
 
@@ -135,11 +191,13 @@ EOF2
 
   status)
     if [[ -f "$STATE_PATH" ]]; then
+      guest_path="$(project_mountpoint "$(cat "$STATE_PATH")")"
       echo "Host project:  $(cat "$STATE_PATH")"
       echo "Staging dir:   $EXPORT_DIR"
-      echo "Guest path:    /home/${CODEX_USER}/workspace"
+      echo "Guest path:    $guest_path"
       export_is_mounted && findmnt "$EXPORT_DIR"
-      if guest_ssh 'findmnt -rn -T /home/codex/workspace -t virtiofs >/dev/null && echo "Guest mount:   mounted" || echo "Guest mount:   not mounted"' 2>/dev/null; then
+      printf -v status_command "findmnt -rn -M %q -t virtiofs >/dev/null && echo 'Guest mount:   mounted' || echo 'Guest mount:   not mounted'" "$guest_path"
+      if guest_ssh "$status_command" 2>/dev/null; then
         :
       fi
     else
