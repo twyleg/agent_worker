@@ -16,6 +16,51 @@ user; creation obtains sudo authorization for individual privileged operations.
 Ensure the user script directory is on ``PATH``. The ``agent_worker`` console
 command and ``python -m agent_worker`` use the same application.
 
+Shell completion
+----------------
+
+The CLI can generate completion scripts for Bash, Zsh and Fish. Completion covers
+subcommands, options, fixed choices, directory paths and attached project names.
+Project completion reads local records using the selected configuration and data
+directory; it does not connect to the VM or initialize application logging.
+
+Builds ship scripts for all three shells. pipx 1.16.0 and newer expose them under
+``~/.local/share``; a default ``pip install --user`` installs them there directly.
+Fish automatically discovers
+``~/.local/share/fish/vendor_completions.d/agent_worker.fish``. Bash requires its
+``bash-completion`` framework, and Zsh requires
+``~/.local/share/zsh/site-functions`` on ``fpath`` before ``compinit``.
+
+Older pipx versions and pip installs inside virtual environments need manual
+shell registration. For Bash, add this to ``~/.bashrc``:
+
+.. code-block:: bash
+
+   eval "$(agent_worker completion bash)"
+
+For Zsh, add this after ``compinit`` in ``~/.zshrc``:
+
+.. code-block:: zsh
+
+   eval "$(agent_worker completion zsh)"
+
+For Fish, load completion in the current session:
+
+.. code-block:: fish
+
+   agent_worker completion fish | source
+
+To persist manual Fish setup:
+
+.. code-block:: fish
+
+   mkdir -p ~/.config/fish/completions
+   agent_worker completion fish > ~/.config/fish/completions/agent_worker.fish
+
+Type a space after ``agent_worker`` before pressing Tab. In Fish,
+``complete -C 'agent_worker '`` should list the application's subcommands.
+Remote command arguments passed to ``vm ssh`` are not completed against the guest.
+
 VM and projects
 ---------------
 

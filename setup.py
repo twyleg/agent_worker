@@ -29,9 +29,15 @@ setup(
     long_description=read("README.md"),
     long_description_content_type="text/markdown",
     include_package_data=True,
+    data_files=[
+        ("share/bash-completion/completions", ["completions/bash/agent_worker"]),
+        ("share/zsh/site-functions", ["completions/zsh/_agent_worker"]),
+        ("share/fish/vendor_completions.d", ["completions/fish/agent_worker.fish"]),
+    ],
     install_requires=[
         "simple-python-app==0.4.1",
         "PyYAML~=6.0.2",
+        "argcomplete~=3.7.2",
     ],
     entry_points={
         "console_scripts": [

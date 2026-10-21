@@ -50,6 +50,11 @@ CI targets Linux with Python 3.11 and 3.12, reflecting the host's KVM/libvirt an
 The project uses the template's setup/Black/tox conventions. A minimal
 ``pyproject.toml`` selects a local backend that delegates to setuptools and
 updates the latest source archive link after a successful source build.
+The backend also generates Bash, Zsh and Fish integration scripts into the ignored
+``completions/`` directory before building a source distribution, wheel or editable
+wheel. ``setup.py`` installs them as data files under the standard ``share/``
+directories. Generation imports only argcomplete, which is declared as a build
+dependency; it does not import the application or its runtime configuration.
 
 Application lifecycle
 ---------------------
@@ -99,9 +104,9 @@ interpreters. For one locally available interpreter:
 Builds use ``--no-isolation`` after installing ``requirements.txt`` so the
 template's pinned setuptools/wheel and Twine versions are used together. The CLI
 tox environment checks its own output directory instead of stale artifacts.
-Each source build creates or replaces ``agent_worker_latest.tar.gz`` in its
+Each source build creates or replaces ``agent_worker-latest.tar.gz`` in its
 output directory with a relative symlink to the archive returned by setuptools.
-The default location is ``dist/agent_worker_latest.tar.gz``; ``--outdir`` is
+The default location is ``dist/agent_worker-latest.tar.gz``; ``--outdir`` is
 also supported. Versioneer is declared in ``build-system.requires`` so
 ``setup.py`` can import it during isolated pip/pipx installations. The CLI tox
 environment also builds a wheel from the source archive in an isolated build
@@ -118,7 +123,7 @@ integration tests when tmux is available; they do not alter a real VM.
 .. code-block:: bash
 
    python -m build --no-isolation
-   twine check dist/agent_worker-*.tar.gz dist/*.whl
+   twine check dist/agent_worker-[0-9]*.tar.gz dist/*.whl
    make -C docs html
    tox -e pyinstaller
    dist/main --help

@@ -1,3 +1,4 @@
+# PYTHON_ARGCOMPLETE_OK
 """Command registration and handlers using simple-python-app's SubcommandApplication."""
 
 import argparse
@@ -7,9 +8,12 @@ import sys
 from pathlib import Path
 from typing import cast
 
+import argcomplete
+from argcomplete.completers import DirectoriesCompleter
 from simple_python_app.subcommand_application import Command, SubcommandApplication
 
 from agent_worker import __version__
+from agent_worker.completion import project_selectors
 from agent_worker.provision import Provisioner
 from agent_worker.settings import RESOURCE_DIR, Settings
 from agent_worker.shares import Shares
@@ -32,15 +36,19 @@ class Application(SubcommandApplication):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.description = "Manage an isolated Xubuntu playground for coding agents."
-        parser.add_argument("--data-dir", type=Path, help="VM data directory (overrides DATA_DIR)")
+        data_dir = parser.add_argument("--data-dir", type=Path, help="VM data directory (overrides DATA_DIR)")
+        setattr(data_dir, "completer", DirectoriesCompleter())
         parser.add_argument("--vm-name", help="Libvirt domain name (overrides VM_NAME)")
         parser.add_argument("--libvirt-uri", help="Libvirt connection URI")
-        parser.add_argument("--resource-dir", type=Path, help="Directory containing custom provisioning resources")
+        resource_dir = parser.add_argument("--resource-dir", type=Path, help="Directory containing custom provisioning resources")
+        setattr(resource_dir, "completer", DirectoriesCompleter())
 
         self._setup_vm_commands()
         self._setup_project_commands()
         self._setup_codex_commands()
         self._setup_guest_commands()
+        self._setup_completion_command()
+        argcomplete.autocomplete(parser)
 
     # The framework annotates handlers as returning int; run() also accepts void callbacks.
     def _setup_vm_commands(self) -> None:
@@ -108,7 +116,8 @@ class Application(SubcommandApplication):
             description="Share one selected host project with the guest using virtiofs.",
             handler=cast(Command.Handler, lambda args: Shares(self.vm).attach(args.path, args.name)),
         )
-        attach.parser.add_argument("path", type=Path)
+        project_path = attach.parser.add_argument("path", type=Path)
+        setattr(project_path, "completer", DirectoriesCompleter())
         attach.parser.add_argument("name", nargs="?", help="Guest directory name (defaults to host directory name)")
         detach = self.add_subcommand(
             command="project detach",
@@ -117,7 +126,15 @@ class Application(SubcommandApplication):
             handler=cast(Command.Handler, lambda args: Shares(self.vm).detach(args.selector, args.all)),
         )
         selection = detach.parser.add_mutually_exclusive_group()
-        selection.add_argument("selector", nargs="?", help="Guest name or host path")
+
+        def complete_projects(prefix: str, parsed_args: argparse.Namespace, **kwargs: object) -> list[str]:
+            config_filepath = getattr(parsed_args, "config", None) or self.find_file(
+                self.application_config_search_paths, self.application_config_search_filenames
+            )
+            return project_selectors(prefix, parsed_args, config_filepath)
+
+        selector = selection.add_argument("selector", nargs="?", help="Guest name or host path")
+        setattr(selector, "completer", complete_projects)
         selection.add_argument("--all", action="store_true", help="Detach every tracked project")
         status = self.add_subcommand(
             command="project status",
@@ -146,6 +163,15 @@ class Application(SubcommandApplication):
             description="Run as root inside the guest to repair or update its development tools.",
             handler=cast(Command.Handler, lambda args: Provisioner(self.vm).setup_guest()),
         )
+
+    def _setup_completion_command(self) -> None:
+        completion = self.add_subcommand(
+            command="completion",
+            help="Generate a shell completion script",
+            description="Print a completion script for Bash, Zsh or Fish to load in your shell.",
+            handler=cast(Command.Handler, lambda args: print(argcomplete.shellcode(["agent_worker"], shell=args.shell), end="")),
+        )
+        completion.parser.add_argument("shell", choices=("bash", "zsh", "fish"))
 
     def load_settings(self, args: argparse.Namespace) -> Settings:
         names = ("data_dir", "vm_name", "libvirt_uri", "resource_dir", "ram_mb", "vcpus", "disk_gb")

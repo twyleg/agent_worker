@@ -40,6 +40,56 @@ python -m pip install -e .
 The main command is `agent_worker`; `python -m agent_worker` provides the same
 interface. Each action and subaction has `--help`.
 
+## Shell completion
+
+Completion covers subcommands, option names, fixed choices, directories and
+attached project names/paths for `project detach`. It uses the parser directly,
+so new commands and options become available automatically. Project suggestions
+read local records and honor `--config`, `--data-dir` and environment settings;
+completion does not connect to the VM or initialize logging.
+
+Builds include completion files for Bash, Zsh and Fish. With **pipx 1.16.0 or
+newer**, installation exposes them automatically under `~/.local/share/`.
+With a default `pip install --user`, they are installed there directly. Fish finds
+`~/.local/share/fish/vendor_completions.d/agent_worker.fish` automatically, so no
+manual `source` or configuration file is required.
+
+Bash uses its `bash-completion` framework to discover the installed file. Zsh
+needs `~/.local/share/zsh/site-functions` on `fpath` before `compinit`.
+
+For older pipx versions or pip installs inside a virtual environment, use the
+following manual setup. Bash (`~/.bashrc`):
+
+```bash
+eval "$(agent_worker completion bash)"
+```
+
+Zsh, after `compinit` in `~/.zshrc`:
+
+```zsh
+eval "$(agent_worker completion zsh)"
+```
+
+Fish, for the current session:
+
+```fish
+agent_worker completion fish | source
+```
+
+To persist manual Fish setup:
+
+```fish
+mkdir -p ~/.config/fish/completions
+agent_worker completion fish > ~/.config/fish/completions/agent_worker.fish
+```
+
+Type a space after `agent_worker` before pressing Tab to complete subcommands.
+In Fish, `complete -C 'agent_worker '` should list commands such as `vm` and
+`project`. The completion script queries the current parser on each Tab press,
+so new commands and options appear after upgrades without regenerating your
+shell configuration. Remote arguments following `vm ssh` do not receive
+remote-shell completion.
+
 ## Workflow
 
 ```bash
@@ -391,13 +441,13 @@ tox -e type,lint,cli,pytest,docs,pyinstaller  # use the current interpreter
 tox -e lint_update                   # Black formatting, template line length 160
 python -m build --no-isolation
 pipx install --force ./dist/agent_worker-latest.tar.gz # Install the package for this user
-twine check dist/agent_worker-*.tar.gz dist/*.whl
+twine check dist/agent_worker-[0-9]*.tar.gz dist/*.whl
 make -C docs html
 python examples/example.py
 dist/main --help                     # after tox -e pyinstaller
 ```
 
-Each source build automatically updates `dist/agent_worker_latest.tar.gz` to
+Each source build automatically updates `dist/agent_worker-latest.tar.gz` to
 point to the newly built archive. The link is relative and is also created in the
 selected output directory when using `--outdir`. Wheel-only builds leave it alone.
 `pyproject.toml` selects a small build hook in `tools/_build_backend.py`; setuptools and

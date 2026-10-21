@@ -36,7 +36,7 @@ jobs:
     - name: Build package
       run: python -m build --no-isolation
     - name: Remove local build alias before publishing
-      run: rm dist/agent_worker_latest.tar.gz
+      run: rm dist/agent_worker-latest.tar.gz
     - name: Publish package
       uses: pypa/gh-action-pypi-publish@27b31702a0e7fc50959f5ad993c78deac1bdfc29
       with:

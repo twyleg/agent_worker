@@ -6,6 +6,7 @@ include setup.cfg tox.ini pytest.ini logging.yaml pyinstaller.spec
 include agent_worker_config.json
 include versioneer.py
 graft agent_worker
+graft completions
 include agent_worker/py.typed
 include agent_worker/_version.py
 graft docs
