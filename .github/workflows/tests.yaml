@@ -1,0 +1,44 @@
+name: tests
+run-name: tests
+on:
+  workflow_call:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unittests:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Host management uses Linux/KVM, fcntl and Python's tomllib.
+        os: [ubuntu-latest]
+        python_version: ['3.11', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python_version }}
+      - name: Install tmux for workspace integration tests
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: python -m pip install -r requirements.txt
+      - run: tox -e pytest
+  tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - run: tox -e type,lint,cli,docs,pyinstaller

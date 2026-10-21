@@ -1,0 +1,25 @@
+version: 1
+disable_existing_loggers: False
+formatters:
+  simple:
+    format: '[%(asctime)s.%(msecs)03d][%(levelname)s][%(name)s]: %(message)s'
+    datefmt: '%Y-%m-%d %H:%M:%S'
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: WARNING
+    formatter: simple
+    stream: ext://sys.stderr
+  file:
+    class: logging.FileHandler
+    level: WARNING
+    formatter: simple
+    filename: agent_worker.log
+loggers:
+  main:
+    level: WARNING
+    handlers: [file, console]
+    propagate: no
+root:
+  level: WARNING
+  handlers: [file, console]

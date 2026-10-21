@@ -1,0 +1,9 @@
+{
+  "vm_name": "agent-xubuntu",
+  "ram_mb": 12288,
+  "vcpus": 6,
+  "disk_gb": 64,
+  "timezone": "Europe/Berlin",
+  "locale": "en_US.UTF-8",
+  "keyboard_layout": "us"
+}

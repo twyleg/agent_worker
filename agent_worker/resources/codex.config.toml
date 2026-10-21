@@ -1,0 +1,3 @@
+# Default permissions inside the disposable agent VM.
+sandbox_mode = "danger-full-access"
+approval_policy = "never"

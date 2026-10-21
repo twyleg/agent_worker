@@ -1,0 +1,18 @@
+include README.md
+include pyproject.toml tools/_build_backend.py
+include LICENSE
+include requirements.txt
+include setup.cfg tox.ini pytest.ini logging.yaml pyinstaller.spec
+include agent_worker_config.json
+include versioneer.py
+graft agent_worker
+include agent_worker/py.typed
+include agent_worker/_version.py
+graft docs
+graft examples
+graft resources
+graft scripts
+graft tests
+prune docs/build
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]

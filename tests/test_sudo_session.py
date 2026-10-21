@@ -1,97 +1,57 @@
-import os
-from pathlib import Path
+from __future__ import annotations
+
 import subprocess
-import tempfile
+import time
 import unittest
+from unittest.mock import Mock
 
-
-ROOT = Path(__file__).resolve().parents[1]
-HELPER = ROOT / "scripts/lib/agent_vm_sudo_session"
+from agent_worker.system import CommandError, Runner, SudoSession
 
 
 class SudoSessionTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.directory = Path(self.temp.name)
-        mock = self.directory / "sudo"
-        mock.write_text('''#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "$SUDO_LOG"
-if [[ "$*" == -v ]]; then exit "${INITIAL_STATUS:-0}"; fi
-if [[ "$*" == '-n -v' ]]; then exit "${REFRESH_STATUS:-0}"; fi
-[[ "${1:-}" == -n ]] || exit 99
-shift
-"$@"
-''')
-        mock.chmod(0o755)
-        self.env = dict(
-            os.environ,
-            PATH=str(self.directory) + os.pathsep + os.environ["PATH"],
-            SUDO_LOG=str(self.directory / "sudo.log"),
-            SUDO_HELPER=str(HELPER),
-            PID_FILE=str(self.directory / "refresh.pid"),
-        )
+    def runner(self, initial: int = 0, refresh: int = 0) -> Mock:
+        runner = Mock(noninteractive_sudo=False)
+        runner.run.side_effect = lambda *args, **kwargs: subprocess.CompletedProcess(args, initial if not runner.noninteractive_sudo else refresh, "", "")
+        return runner
 
-    def run_session(self, body):
-        return subprocess.run(
-            ["bash", "-c", '''set -euo pipefail
-source "$SUDO_HELPER"
-trap stop_sudo_session EXIT
-''' + body], env=self.env, text=True, capture_output=True, timeout=5,
-        )
+    def test_authorize_refresh_and_stop_on_error(self) -> None:
+        runner = self.runner()
+        with self.assertRaisesRegex(ValueError, "work failed"):
+            with SudoSession(runner, interval=0.01) as session:
+                self.assertTrue(runner.noninteractive_sudo)
+                time.sleep(0.05)
+                raise ValueError("work failed")
+        assert session.thread is not None
+        self.assertFalse(session.thread.is_alive())
+        self.assertFalse(runner.noninteractive_sudo)
+        runner.run.assert_any_call("sudo", "-v")
+        runner.run.assert_any_call("sudo", "-v", check=False, capture=True)
 
-    def assert_refresh_stopped(self):
-        pid = int((self.directory / "refresh.pid").read_text())
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pid, 0)
+    def test_initial_failure_does_not_start_refresh(self) -> None:
+        runner = self.runner()
+        runner.run.side_effect = CommandError(["sudo"], subprocess.CompletedProcess(["sudo"], 17, "", ""))
+        session = SudoSession(runner)
+        with self.assertRaises(CommandError):
+            session.__enter__()
+        self.assertIsNone(session.thread)
+        self.assertFalse(runner.noninteractive_sudo)
 
-    def test_authenticate_once_refresh_and_noninteractive_commands(self):
-        response = self.run_session('''
-sleep() { command sleep 0.02; }
-start_sudo_session
-echo "$SUDO_REFRESH_PID" > "$PID_FILE"
-command sleep 0.15
-sudo printf 'privileged command succeeded\\n'
-''')
-        self.assertEqual(response.returncode, 0, response.stderr)
-        calls = (self.directory / "sudo.log").read_text().splitlines()
-        self.assertEqual(calls.count("-v"), 1)
-        self.assertIn("-n -v", calls)
-        self.assertTrue(any(call.startswith("-n printf") for call in calls))
-        self.assertIn("privileged command succeeded", response.stdout)
-        self.assert_refresh_stopped()
+    def test_refresh_failure_reports_and_stops(self) -> None:
+        runner = self.runner(refresh=1)
+        from unittest.mock import patch
 
-    def test_cleanup_on_failure_preserves_exit_status(self):
-        response = self.run_session('''
-start_sudo_session
-echo "$SUDO_REFRESH_PID" > "$PID_FILE"
-command sleep 0.05
-exit 7
-''')
-        self.assertEqual(response.returncode, 7)
-        self.assert_refresh_stopped()
+        with patch("sys.stderr") as stderr:
+            with SudoSession(runner, interval=0.01) as session:
+                assert session.thread is not None
+                session.thread.join(timeout=1)
+                self.assertFalse(session.thread.is_alive())
+            self.assertIn("could not be refreshed", "".join(call.args[0] for call in stderr.write.call_args_list))
 
-    def test_initial_authentication_failure_stops_before_work(self):
-        self.env["INITIAL_STATUS"] = "17"
-        response = self.run_session("start_sudo_session\necho UNEXPECTED\n")
-        self.assertEqual(response.returncode, 17)
-        self.assertNotIn("UNEXPECTED", response.stdout)
-        self.assertEqual((self.directory / "sudo.log").read_text(), "-v\n")
+    def test_runner_makes_privileged_operations_noninteractive(self) -> None:
+        from unittest.mock import patch
 
-    def test_refresh_failure_is_noninteractive_and_reported(self):
-        self.env["REFRESH_STATUS"] = "1"
-        response = self.run_session('''
-sleep() { command sleep 0.02; }
-start_sudo_session
-echo "$SUDO_REFRESH_PID" > "$PID_FILE"
-command sleep 0.15
-''')
-        self.assertIn("authorization could not be refreshed", response.stderr)
-        self.assertEqual((self.directory / "sudo.log").read_text().splitlines(), [
-            "-v", "-n -v",
-        ])
-        self.assert_refresh_stopped()
-
-
-if __name__ == "__main__":
-    unittest.main()
+        runner = Runner()
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+            runner.noninteractive_sudo = True
+            runner.run("sudo", "pacman", "-S", "libvirt")
+            self.assertEqual(run.call_args.args[0], ["sudo", "-n", "pacman", "-S", "libvirt"])

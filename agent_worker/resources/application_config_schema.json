@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "data_dir": {
+      "type": "string"
+    },
+    "state_dir": {
+      "type": "string"
+    },
+    "image_dir": {
+      "type": "string"
+    },
+    "export_dir": {
+      "type": "string"
+    },
+    "resource_dir": {
+      "type": "string"
+    },
+    "vm_name": {
+      "type": "string"
+    },
+    "agent_user": {
+      "type": "string"
+    },
+    "libvirt_uri": {
+      "type": "string"
+    },
+    "share_tag": {
+      "type": "string"
+    },
+    "workspace_helper_prefix": {
+      "type": "string"
+    },
+    "xubuntu_series": {
+      "type": "string"
+    },
+    "timezone": {
+      "type": "string"
+    },
+    "locale": {
+      "type": "string"
+    },
+    "keyboard_layout": {
+      "type": "string"
+    },
+    "keyboard_variant": {
+      "type": "string"
+    },
+    "guest_hostname": {
+      "type": "string"
+    },
+    "ram_mb": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "vcpus": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "disk_gb": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ready_timeout": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false
+}

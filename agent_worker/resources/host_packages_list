@@ -1,0 +1,10 @@
+qemu-desktop
+libvirt
+virt-install
+virt-viewer
+dnsmasq
+edk2-ovmf
+virtiofsd
+curl
+openssh
+openssl
