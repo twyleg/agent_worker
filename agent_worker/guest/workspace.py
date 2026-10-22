@@ -95,7 +95,7 @@ def main() -> None:
                         shlex.join(["python3", str(helpers / "dashboard.py")]),
                         capture=True,
                     ).stdout.strip()
-                    run("tmux", "split-window", "-v", "-p", "40", "-t", right, "-c", str(workdir))
+                    run("tmux", "split-window", "-v", "-l", "40%", "-t", right, "-c", str(workdir))
                     run("tmux", "select-pane", "-t", left)
                     run(
                         "tmux",
