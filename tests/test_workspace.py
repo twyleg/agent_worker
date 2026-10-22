@@ -256,14 +256,19 @@ else:
         )
 
     def connect(self) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [sys.executable, str(self.helpers / "workspace.py")],
-            env=self.env,
-            text=True,
-            capture_output=True,
-            check=True,
-            timeout=10,
-        )
+        try:
+            return subprocess.run(
+                [sys.executable, str(self.helpers / "workspace.py")],
+                env=self.env,
+                text=True,
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+        except subprocess.CalledProcessError as exc:
+            print("STDOUT:", exc.stdout, flush=True)
+            print("STDERR:", exc.stderr, file=sys.stderr, flush=True)
+            raise
 
     def panes(self) -> list[str]:
         return self.tmux_run(
