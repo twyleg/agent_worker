@@ -18,7 +18,17 @@ else:
 
 
 def run(*args: str, capture: bool = False, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=capture, text=True, check=check)
+    try:
+        return subprocess.run(
+            args,
+            capture_output=capture,
+            text=True,
+            check=check,
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"Failed command: {exc.cmd}", file=sys.stderr)
+        print(f"STDERR: {exc.stderr}", file=sys.stderr, flush=True)
+        raise
 
 
 def main() -> None:
