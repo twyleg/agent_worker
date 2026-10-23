@@ -169,6 +169,16 @@ agent_worker --data-dir /srv/agent-worker --vm-name my-agent vm status
 agent_worker --config agent_worker_config.json vm create --ram-mb 8192 --vcpus 4 --disk-gb 50
 ```
 
+VM, project and Codex commands print the selected VM, resolved data directory and
+libvirt URI before doing any work, for example:
+
+```text
+VM: agent-xubuntu | Data: /home/you/.local/share/agent-worker | URI: qemu:///system
+```
+
+This information goes to stderr so JSON and remote command output on stdout
+remain usable. Help, shell completion and guest-local setup do not print it.
+
 The framework loads `agent_worker_config.json` or `.agent_worker_config.json`
 from the current directory, then your home directory. The root configuration is
 the editable template-style starting point; a packaged empty configuration supplies

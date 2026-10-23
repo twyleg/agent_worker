@@ -121,7 +121,9 @@ def test_completion_command_generates_shell_script(tmp_path: Path, monkeypatch: 
     with pytest.raises(SystemExit) as exc:
         main(["completion", shell])
     assert exc.value.code == 0
-    script = capsys.readouterr().out
+    captured = capsys.readouterr()
+    script = captured.out
+    assert captured.err == ""
     assert "agent_worker" in script
     if shell == "fish":
         assert "complete --command agent_worker" in script

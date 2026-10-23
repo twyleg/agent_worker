@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -103,13 +104,24 @@ def test_remote_exit_status_is_preserved(tmp_path: Path) -> None:
     assert exc.value.code == 7
 
 
-def test_usage_json_stdout_is_unpolluted() -> None:
+def test_usage_json_stdout_is_unpolluted(capsys: pytest.CaptureFixture[str]) -> None:
     with patch.object(VM, "usage", side_effect=lambda value: print('{"rateLimits": {}}')):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout), pytest.raises(SystemExit) as exc:
             main(["codex", "usage", "--json"])
     assert exc.value.code == 0
     assert json.loads(stdout.getvalue()) == {"rateLimits": {}}
+    assert capsys.readouterr().err.startswith("VM: ")
+
+
+def test_vm_context_precedes_command_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with patch("agent_worker.main.VM") as vm:
+        vm.return_value.status.side_effect = lambda: print("command started", file=sys.stderr)
+        assert Application().start(["--data-dir", str(tmp_path), "--vm-name", "selected-vm", "vm", "status"]) == 0
+    assert capsys.readouterr().err.splitlines() == [
+        f"VM: selected-vm | Data: {tmp_path} | URI: qemu:///system",
+        "command started",
+    ]
 
 
 def vm_with_runner(tmp_path: Path) -> tuple[VM, Mock]:

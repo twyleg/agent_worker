@@ -157,12 +157,13 @@ class Application(SubcommandApplication):
 
     def _setup_guest_commands(self) -> None:
         self.root_command.add_subcommand("guest", help="Repair guest tooling (run inside the guest)")
-        self.add_subcommand(
+        setup = self.add_subcommand(
             command="guest setup",
             help="Install or update guest tooling",
             description="Run as root inside the guest to repair or update its development tools.",
             handler=cast(Command.Handler, lambda args: Provisioner(self.vm).setup_guest()),
         )
+        setup.parser.set_defaults(show_vm_context=False)
 
     def _setup_completion_command(self) -> None:
         completion = self.add_subcommand(
@@ -172,6 +173,7 @@ class Application(SubcommandApplication):
             handler=cast(Command.Handler, lambda args: print(argcomplete.shellcode(["agent_worker"], shell=args.shell), end="")),
         )
         completion.parser.add_argument("shell", choices=("bash", "zsh", "fish"))
+        completion.parser.set_defaults(show_vm_context=False)
 
     def load_settings(self, args: argparse.Namespace) -> Settings:
         names = ("data_dir", "vm_name", "libvirt_uri", "resource_dir", "ram_mb", "vcpus", "disk_gb")
@@ -179,7 +181,10 @@ class Application(SubcommandApplication):
 
     def run(self, args: argparse.Namespace) -> int:
         try:
-            self.vm = VM(self.load_settings(args))
+            settings = self.load_settings(args)
+            if getattr(args, "show_vm_context", True):
+                print(f"VM: {settings.vm_name} | Data: {settings.data_dir} | URI: {settings.libvirt_uri}\n", file=sys.stderr, flush=True)
+            self.vm = VM(settings)
             super().run(args)
             return 0
         except KeyboardInterrupt:
