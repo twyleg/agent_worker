@@ -71,9 +71,9 @@ def test_directory_completion_excludes_files(tmp_path: Path, argument: str) -> N
     assert candidates == ["sample directory/"]
 
 
-@pytest.mark.parametrize("source", ["cwd", "home", "explicit", "environment", "cli"])
+@pytest.mark.parametrize("source", ["cwd", "home", "explicit", "environment", "cli", "local-data"])
 def test_project_completion_uses_selected_settings(tmp_path: Path, source: str) -> None:
-    data_dir = tmp_path / "selected-data"
+    data_dir = tmp_path / (".data" if source == "local-data" else "selected-data")
     record = data_dir / "state/shares/sample"
     Share(record, tmp_path / "sample source", "sample project", tmp_path / "export", "sample-tag", record / "device.xml").save()
     line = "agent_worker "
@@ -87,7 +87,7 @@ def test_project_completion_uses_selected_settings(tmp_path: Path, source: str) 
             line += f"--config {shlex.quote(str(config_path))} "
     elif source == "environment":
         environment["DATA_DIR"] = str(data_dir)
-    else:
+    elif source == "cli":
         # The CLI data directory overrides the value found in local configuration.
         (tmp_path / "agent_worker_config.json").write_text(json.dumps({"data_dir": str(tmp_path / "other-data")}))
         line += f"--data-dir {shlex.quote(str(data_dir))} "

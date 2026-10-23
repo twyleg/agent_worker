@@ -159,7 +159,8 @@ to lowest priority:
 1. Explicit CLI options.
 2. Existing environment variables (including the legacy `CODEX_*` aliases).
 3. JSON application configuration.
-4. Defaults.
+4. VM identity saved in the selected data directory (`vm.json`).
+5. Defaults, including local `.data` discovery.
 
 Global options go **before** the action:
 
@@ -177,7 +178,7 @@ the current directory. Unknown keys are rejected.
 
 | JSON setting | Environment variable | Default |
 | --- | --- | --- |
-| `vm_name` | `VM_NAME` | `agent-xubuntu` |
+| `vm_name` | `VM_NAME` | Saved/adopted VM name, otherwise directory-specific; see below |
 | `libvirt_uri` | `LIBVIRT_URI` | `qemu:///system` |
 | `agent_user` | `AGENT_USER` / `CODEX_USER` | `agent` |
 | `data_dir` | `DATA_DIR` | See runtime data below |
@@ -208,16 +209,60 @@ A packaged logging configuration supports installed use. Logs default to
 
 ## Runtime data and migration
 
-Running from a checkout, including an editable install, retains the original
-`<checkout>/.data` default, independent of the shell's current directory. A normal
-wheel/pip install defaults to `${XDG_DATA_HOME:-~/.local/share}/agent-worker`.
-Runtime files never go into the installed package directory.
+Without an explicit `data_dir` setting, the CLI uses `.data` in the **current
+working directory** if it is a directory or a symlink to one. Otherwise it uses
+`${XDG_DATA_HOME:-~/.local/share}/agent-worker`. It does not search parent
+directories or use the package/checkout location. A `.data` file or broken
+symlink produces an error instead of silently selecting the user-wide VM.
+This behavior is the same for source checkouts, editable installs and wheels.
 
-To manage an existing VM after switching to a normal pip installation, explicitly
-keep the checkout's data path:
+The selected data directory determines the VM. New local or explicitly selected
+directories get a unique default domain name (`agent-xubuntu-<directory-hash>`);
+the user-wide directory keeps `agent-xubuntu` by default. Creation saves the
+domain name, libvirt URI and guest login user in `<data_dir>/vm.json`. Later
+commands read that identity automatically, including after the directory moves
+(libvirt's storage paths still need updating as described below).
+
+Existing directories without `vm.json` adopt the name of their single
+`images/*.qcow2` disk, including custom `IMAGE_DIR` locations. Multiple disks
+require an explicit VM name. Settings lookup and shell completion do not create
+directories or metadata. Creation writes `vm.json` before installing the VM, so
+an interrupted installation retains its selected identity.
+
+For separate project VMs, create an empty `.data` directory in each project:
 
 ```bash
-export DATA_DIR=/absolute/path/to/agent_worker/.data
+cd ~/dev/project-one
+mkdir .data
+agent_worker vm create
+agent_worker vm connect
+
+cd ~/dev/project-two
+mkdir .data
+agent_worker vm create
+agent_worker vm connect
+```
+
+Each directory selects its own VM, disk, SSH key and share records. To select an
+existing VM locally, symlink `.data` to its data directory instead. Two symlinks
+to the same data directory select the same VM.
+
+Explicit settings remain available:
+
+```bash
+agent_worker --data-dir /srv/my-agent vm status
+agent_worker --data-dir /srv/my-agent --vm-name custom-agent vm create
+```
+
+The second command saves `custom-agent` in that data directory; subsequent
+commands only need to select the directory. Explicit `vm_name` values in JSON,
+`VM_NAME`, or `--vm-name` still override the saved/generated name. Remove a fixed
+`vm_name` from shared configuration to allow automatic per-directory selection.
+Explicit `STATE_DIR`, `IMAGE_DIR` and export overrides remain independent; avoid
+pointing multiple instances at shared state. To select a directory in a shell:
+
+```bash
+export DATA_DIR=/srv/my-agent
 agent_worker vm status
 ```
 
@@ -225,14 +270,15 @@ Share records retain their existing format. New runtime data has this layout:
 
 ```text
 <data_dir>/
+  vm.json
   images/
-    agent-xubuntu.qcow2
+    <vm-name>.qcow2
     iso/
   state/
     id_ed25519
     id_ed25519.pub
     known_hosts
-    agent-xubuntu.password
+    <vm-name>.password
     autoinstall/
     shares/<project-id>/
       project.path

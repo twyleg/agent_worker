@@ -103,7 +103,8 @@ Configuration
 ``.agent_worker_config.json`` from the current directory, then the user's home
 directory. A packaged empty configuration supplies defaults when neither exists.
 Use ``--config PATH`` for an explicit file. CLI options override environment
-variables, which override JSON values and built-in defaults.
+variables, which override JSON values, the selected data directory's saved VM
+identity, and built-in defaults.
 
 .. code-block:: bash
 
@@ -115,10 +116,30 @@ Global options precede the action. Existing ``VM_NAME``, ``DATA_DIR``,
 legacy environment settings remain supported, including the ``CODEX_*`` aliases.
 See the repository README for the full settings table.
 
-A checkout or editable installation retains ``<checkout>/.data``. A normal
-installation uses ``${XDG_DATA_HOME:-~/.local/share}/agent-worker``. To manage
-an existing VM after installing a wheel, set ``DATA_DIR`` to its existing data
-path. No host authentication keys or home directory are shared automatically.
+Without an explicit data directory, all installations use ``.data`` in the
+current working directory if it exists as a directory (including a symlink to
+one). Otherwise they use ``${XDG_DATA_HOME:-~/.local/share}/agent-worker``. Parent
+directories are not searched. A file or broken symlink at ``.data`` is an error.
+
+Each new local data directory gets its own default VM name. Creation saves the
+name, libvirt URI and guest user in ``vm.json`` within that directory. Future
+commands select that VM automatically. Existing data without ``vm.json`` adopts
+the name of its single qcow2 disk; multiple disks require an explicit VM name.
+The user-wide directory retains the default name ``agent-xubuntu``.
+
+.. code-block:: bash
+
+   cd ~/dev/project-one
+   mkdir .data
+   agent_worker vm create
+   agent_worker vm connect
+
+Repeat in another project directory for an independent VM, or symlink ``.data``
+to an existing data directory to select that VM. Explicit ``--data-dir``,
+``--vm-name``, environment variables and JSON settings still override discovery.
+Remove a fixed ``vm_name`` from shared JSON configuration to allow automatic
+selection. No host authentication keys or home directory are shared
+automatically.
 
 The root ``logging.yaml`` follows the template's console/file logging layout;
 console output goes to stderr so machine-readable quota output stays valid JSON.

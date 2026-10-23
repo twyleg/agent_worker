@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import subprocess
 from contextlib import ExitStack
 from pathlib import Path
@@ -117,6 +118,8 @@ def test_create_pipeline_and_private_credentials(tmp_path: Path) -> None:
     assert p.settings.state_dir.stat().st_mode & 0o777 == 0o700
     assert p.settings.ssh_key.stat().st_mode & 0o777 == 0o600
     assert (p.settings.seed_dir / "user-data").is_file()
+    identity = json.loads((p.settings.data_dir / "vm.json").read_text())
+    assert identity == {"vm_name": p.settings.vm_name, "libvirt_uri": p.settings.libvirt_uri, "agent_user": p.settings.agent_user}
     assert p.runner.noninteractive_sudo is False
     openssl_call = next(c for c in cast(Mock, p.runner.run).call_args_list if c.args[:2] == ("openssl", "passwd"))
     assert p.settings.password_file.read_text().strip() not in openssl_call.args
@@ -132,6 +135,7 @@ def test_existing_vm_requires_explicit_recreate(tmp_path: Path) -> None:
     cast(Mock, p.vm.remove_domain).assert_not_called()
     cast(Mock, p.install).assert_not_called()
     cast(Mock, p.download_iso).assert_not_called()
+    assert not (p.settings.data_dir / "vm.json").exists()
     assert p.runner.noninteractive_sudo is False
 
 

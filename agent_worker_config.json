@@ -1,5 +1,4 @@
 {
-  "vm_name": "agent-xubuntu",
   "ram_mb": 12288,
   "vcpus": 6,
   "disk_gb": 64,

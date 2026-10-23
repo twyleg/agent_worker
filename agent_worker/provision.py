@@ -333,6 +333,7 @@ class Provisioner:
                 if recreate:
                     Shares(self.vm).cleanup()
                     self.runner.run("sudo", "rm", "-f", "--", settings.disk_path)
+                settings.save_identity()
                 self.install(iso)
                 ip = self.wait()
                 version = self.vm.ssh("codex --version", ip=ip, capture=True, check=False).stdout.strip()

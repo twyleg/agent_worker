@@ -36,9 +36,9 @@ class Application(SubcommandApplication):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         parser.description = "Manage an isolated Xubuntu playground for coding agents."
-        data_dir = parser.add_argument("--data-dir", type=Path, help="VM data directory (overrides DATA_DIR)")
+        data_dir = parser.add_argument("--data-dir", type=Path, help="VM data directory (overrides DATA_DIR and local .data discovery)")
         setattr(data_dir, "completer", DirectoriesCompleter())
-        parser.add_argument("--vm-name", help="Libvirt domain name (overrides VM_NAME)")
+        parser.add_argument("--vm-name", help="Libvirt domain name (overrides VM_NAME and the selected data directory's VM)")
         parser.add_argument("--libvirt-uri", help="Libvirt connection URI")
         resource_dir = parser.add_argument("--resource-dir", type=Path, help="Directory containing custom provisioning resources")
         setattr(resource_dir, "completer", DirectoriesCompleter())

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -12,12 +15,18 @@ from typing import Any, Self
 RESOURCE_DIR = Path(__file__).parent / "resources"
 
 
-def default_data_dir() -> Path:
-    # Source checkouts retain their existing data; wheels never write into site-packages.
-    root = Path(__file__).resolve().parent.parent
-    if (root / "setup.py").is_file() and (root / "scripts").is_dir():
-        return root / ".data"
-    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "agent-worker"
+def user_data_dir(environ: Mapping[str, str] | None = None) -> Path:
+    env = os.environ if environ is None else environ
+    return Path(env.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "agent-worker"
+
+
+def default_data_dir(environ: Mapping[str, str] | None = None) -> Path:
+    local = Path.cwd() / ".data"
+    if local.is_dir():
+        return local
+    if local.exists() or local.is_symlink():
+        raise ValueError(f"Local data path is not a directory: {local}")
+    return user_data_dir(environ)
 
 
 @dataclass(frozen=True)
@@ -58,13 +67,39 @@ class Settings:
                     values[field.name] = env[name]
                     break
         values.update({key: value for key, value in (overrides or {}).items() if value is not None})
-        values.setdefault("data_dir", default_data_dir())
+        if "data_dir" not in values:
+            values["data_dir"] = default_data_dir(env)
         values["data_dir"] = Path(values["data_dir"]).expanduser().resolve()
+        identity_path = values["data_dir"] / "vm.json"
+        if identity_path.exists() or identity_path.is_symlink():
+            try:
+                identity = json.loads(identity_path.read_text())
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid VM identity: {identity_path}") from exc
+            if (
+                not isinstance(identity, dict)
+                or set(identity) != {"vm_name", "libvirt_uri", "agent_user"}
+                or not all(isinstance(value, str) and value for value in identity.values())
+            ):
+                raise ValueError(f"Invalid VM identity: {identity_path}")
+            values = {**identity, **values}
         for name, default in (("state_dir", "state"), ("image_dir", "images"), ("export_dir", "share/current")):
             values.setdefault(name, values["data_dir"] / default)
         for name in ("state_dir", "image_dir", "export_dir", "resource_dir"):
             if name in values:
                 values[name] = Path(values[name]).expanduser().resolve()
+        if "vm_name" not in values:
+            # Adopt existing installations without renaming their libvirt domain.
+            disks = sorted(values["image_dir"].glob("*.qcow2"))
+            if len(disks) > 1:
+                raise ValueError(f"Multiple VM disks in {values['image_dir']}; select one with --vm-name or VM_NAME.")
+            if disks:
+                values["vm_name"] = disks[0].stem
+            elif values["data_dir"] == user_data_dir(env).expanduser().resolve():
+                values["vm_name"] = "agent-xubuntu"
+            else:
+                suffix = hashlib.sha256(str(values["data_dir"]).encode()).hexdigest()[:12]
+                values["vm_name"] = f"agent-xubuntu-{suffix}"
         for name in ("ram_mb", "vcpus", "disk_gb", "ready_timeout"):
             if name in values:
                 values[name] = int(values[name])
@@ -77,6 +112,19 @@ class Settings:
         if not re.fullmatch(r"\d+\.\d+", result.xubuntu_series):
             raise ValueError("Invalid xubuntu_series")
         return result
+
+    def save_identity(self) -> None:
+        """Persist the VM selection on creation; loading settings stays read-only."""
+        identity = {name: getattr(self, name) for name in ("vm_name", "libvirt_uri", "agent_user")}
+        with tempfile.NamedTemporaryFile(mode="w", dir=self.data_dir, prefix=".vm-", delete=False) as output:
+            temporary = Path(output.name)
+            try:
+                json.dump(identity, output, indent=2)
+                output.write("\n")
+                output.close()
+                temporary.replace(self.data_dir / "vm.json")
+            finally:
+                temporary.unlink(missing_ok=True)
 
     @property
     def ssh_key(self) -> Path:

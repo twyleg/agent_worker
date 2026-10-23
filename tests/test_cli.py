@@ -151,6 +151,7 @@ def test_installed_default_never_uses_site_packages_as_data(tmp_path: Path, monk
     from agent_worker import settings
 
     monkeypatch.setattr(settings, "__file__", str(tmp_path / "site-packages/agent_worker/settings.py"))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "user-data"))
     assert settings.default_data_dir() == tmp_path / "user-data/agent-worker"
 
