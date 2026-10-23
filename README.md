@@ -183,7 +183,7 @@ the current directory. Unknown keys are rejected.
 | `data_dir` | `DATA_DIR` | See runtime data below |
 | `state_dir` | `STATE_DIR` | `<data_dir>/state` |
 | `image_dir` | `IMAGE_DIR` | `<data_dir>/images` |
-| `export_dir` | `AGENT_EXPORT_DIR` / `CODEX_EXPORT_DIR` | `<data_dir>/share/current` |
+| `export_dir` | `AGENT_EXPORT_DIR` / `CODEX_EXPORT_DIR` | `<data_dir>/share/current` (old staging mounts only) |
 | `share_tag` | `AGENT_SHARE_TAG` / `CODEX_SHARE_TAG` | `agent-project` (legacy share only) |
 | `workspace_helper_prefix` | `WORKSPACE_HELPER_PREFIX` | `agent-workspace` |
 | `ram_mb` | `RAM_MB` | `12288` |
@@ -221,7 +221,7 @@ export DATA_DIR=/absolute/path/to/agent_worker/.data
 agent_worker vm status
 ```
 
-The on-disk format is unchanged:
+Share records retain their existing format. New runtime data has this layout:
 
 ```text
 <data_dir>/
@@ -240,15 +240,63 @@ The on-disk format is unchanged:
       export.path
       device.tag
       device.xml
-  share/current.d/<project-id>/
 ```
 
-State, SSH keys and autoinstall files are private to your user. Export directories
-are bind mounts, not copies. Detach all projects before moving runtime data.
-Legacy `share/current` and `state/current-share.*` records remain supported.
-Overrides for `IMAGE_DIR`, `STATE_DIR` and `AGENT_EXPORT_DIR` still work. New
-exports use `${AGENT_EXPORT_DIR}.d/<project-id>` when it is set. Libvirt manages
-the domain definition, UEFI state and temporary installer files separately.
+State, SSH keys and autoinstall files are private to your user. New shares export
+the original project directory directly through virtiofs. Runtime data contains
+share records, not project copies, symlinks or host bind mounts. Each record's
+`export.path` and `device.xml` point to the original project directory.
+
+Older versions created **writable host bind mounts** at
+`share/current.d/<project-id>` (or the legacy `share/current`). **Deleting files
+inside these mounted directories deletes the original project files. VM shutdown
+does not unmount these old host mounts.** Existing records remain readable for
+status and detach, but attach requires detaching and reattaching them to switch
+to direct exports. No new host bind mounts are created, including after restart.
+
+`IMAGE_DIR` and `STATE_DIR` overrides still work. `AGENT_EXPORT_DIR` now identifies
+old staging locations for cleanup only. Libvirt manages the domain definition,
+UEFI state and temporary installer files separately.
+
+Before moving or deleting runtime data from an older installation:
+
+1. While the VM is running, run `agent_worker project detach --all`. This also
+   works after the VM is fully shut off; it then skips guest access. If cleanup
+   fails, resolve the error and retry. Tracking is retained for failed shares.
+2. Confirm shutdown has completed with `agent_worker vm status` before moving
+   runtime data or manually unmounting leftover staging paths.
+3. Inspect the host mount table, including both old and new data directory names:
+
+   ```bash
+   findmnt -rn -o TARGET,SOURCE,FSTYPE | rg 'agent-worker(-vm)?/share/'
+   ```
+
+   For custom export locations, inspect those paths too. If records are gone or
+   the directory has already moved, manually unmount each exact staging target
+   shown in the host mount table, for example:
+
+   ```bash
+   sudo umount -- "$HOME/.local/share/agent-worker/share/current.d/PROJECT_ID"
+   ```
+
+   If unmount reports busy, close processes using that staging path and retry.
+   Do not use recursive deletion, forced unmount or lazy unmount as cleanup.
+   Recheck the mount table after unmounting. Empty staging directories may then
+   be removed with `rmdir`, which refuses to delete nonempty directories.
+
+For an existing VM, moving runtime data also requires updating the absolute disk
+and other file paths in its libvirt definition (`sudo virsh -c qemu:///system edit
+agent-xubuntu`). Check `sudo virsh -c qemu:///system dumpxml agent-xubuntu
+--inactive` for references to the old location, and adjust the command if you use
+a different domain or URI. A symlink from a checkout's `.data` to the new location
+does not update libvirt or old share records. Detach old shares before moving;
+reattach projects after the VM starts at its new location. Recreating the VM is
+not required just to change these paths.
+
+If recursive deletion has already reached project files, stop deleting and
+minimize writes to the affected filesystem before attempting recovery. Restore
+backups or remote repositories to a separate filesystem; uncommitted files need
+separate recovery. Unmounting leftovers does not restore deleted files.
 
 For VMs created with earlier defaults, keep their original identity and paths:
 
@@ -354,16 +402,18 @@ agent_worker project status
 ```
 
 `project status` shows one row per project with host and guest mount states and
-the host path. Use `project status --verbose` (or `-v`) for the full paths and
-host mount details. Mount states are highlighted in terminals: green for mounted,
+the host path. Direct exports show `available` when the host directory exists;
+old staging exports show their host mount state. Use `project status --verbose`
+(or `-v`) for the full paths and host mount details. States are highlighted in
+terminals: green for available/mounted,
 red for not mounted, and yellow when the guest cannot be reached. Redirected output
 is plain text; `NO_COLOR` disables automatic colors. Use `--color always` or
 `--color never` to override color detection.
 
-Each project receives an independent bind-mounted host export, virtiofs device
-and guest mount at `/home/agent/workspace/<name>`. Directory names containing
-spaces are supported. Repeating attach for the same path and name reuses the
-record, restoring a missing host export/device and retrying guest mounting.
+Each project receives an independent virtiofs device exporting its original host
+directory directly and a guest mount at `/home/agent/workspace/<name>`. Directory
+names containing spaces are supported. Repeating attach for the same path and name reuses the
+record, restoring a missing device and retrying guest mounting.
 Duplicate guest names need an explicit alias.
 
 ```bash
@@ -374,16 +424,31 @@ agent_worker project detach --all
 
 With one project, `detach` without a selector works. With multiple projects,
 specify a name/path or `--all`. Detach first unmounts the guest, then removes its
-live device and host mount. Tracking is retained when cleanup fails so the
-operation can be retried. Live devices do not persist across VM/host restarts;
+live device. For old staging shares it also unmounts the host bind mount. Direct
+exports never unmount the project directory, even if it is a filesystem mount
+point. Tracking is retained when cleanup fails so the operation can be retried.
+When the VM is fully shut off, detach only cleans host staging mounts and records.
+Live devices do not persist across VM/host restarts;
 repeat each project's `attach` command to restore them. There is no fixed
 single-project limit.
 
 Virtiofs preserves numeric UID/GID ownership. The guest's first user is normally
 `1000:1000`; creation warns if your host user differs. QEMU must be able to traverse
-parent directories and read disk/ISO files. If private home-directory permissions
-block libvirt, grant the configured QEMU account traversal through ACLs or choose
-an accessible `DATA_DIR`.
+parent directories and read disk/ISO files. Before installation, creation reads
+QEMU's UID/GID from libvirt capabilities and checks storage access as that account.
+It grants that UID traversal-only ACLs on inaccessible parent directories and a
+read-only ACL on the ISO if needed. This supports private `~/.local/share`
+directories without making them world-accessible. The host `acl` package supplies
+`setfacl`; no recursive permission changes are made, and the state directory,
+SSH keys and autoinstall credentials remain private. Libvirt manages the disk's
+ownership and permissions. If ACLs are unsupported on the storage filesystem,
+choose an accessible `IMAGE_DIR`.
+
+If an earlier install failed with `Cannot access storage file ... Permission
+denied`, rerun `vm create` after this fix. Check `vm status` first: if the failed
+attempt left a defined domain, inspect it before choosing `vm create --recreate`,
+which deletes its VM disk. OS detection warnings about `generic` are separate
+from storage access failures.
 
 ## GUI use and troubleshooting
 

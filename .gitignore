@@ -161,6 +161,7 @@ cython_debug/
 
 # Project runtime data and local tooling
 /.data/
+/.data
 /docs/build/
 /agent_worker_config.local.json
 !pyinstaller.spec

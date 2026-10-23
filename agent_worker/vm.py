@@ -95,7 +95,19 @@ class VM:
             print("VM started. Once SSH is ready, connect with: agent_worker vm connect")
 
     def shutdown(self) -> None:
+        from agent_worker.shares import Shares
+
         settings = self.settings
+        try:
+            old_shares = any(share.staged for share in Shares(self).records())
+        except (OSError, UnicodeError):
+            # Missing/corrupt tracking must not prevent shutting down the VM.
+            old_shares = True
+        if old_shares:
+            print(
+                "WARNING: Old project bind mounts may survive VM shutdown. Run agent_worker project detach --all "
+                "before deleting or moving runtime data; deleting staging contents deletes original project files."
+            )
         if self.virsh("domstate", settings.vm_name, capture=True).stdout.strip() == "shut off":
             print(f"VM '{settings.vm_name}' is already shut off.")
         else:

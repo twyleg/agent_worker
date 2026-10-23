@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -109,3 +110,17 @@ def test_status_without_projects(shares: Shares, capsys: pytest.CaptureFixture[s
         share.remove()
     shares.status()
     assert capsys.readouterr().out == "No projects are currently attached.\n"
+
+
+def test_direct_export_status(shares: Shares, capsys: pytest.CaptureFixture[str]) -> None:
+    for share in shares.records():
+        share.project.mkdir(parents=True)
+        share.export = share.project
+        share.save()
+    shares.status()
+    assert capsys.readouterr().out.count("available") == 2
+    shares.status(verbose=True)
+    output = capsys.readouterr().out
+    assert output.count("Export dir:") == 2
+    assert "Staging dir:" not in output
+    cast(Mock, shares.runner.run).assert_not_called()

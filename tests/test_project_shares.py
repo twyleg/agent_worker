@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,7 @@ if name == 'sudo':
     os.execvp(args[0], args)
 elif name == 'virsh':
     if 'domstate' in args:
-        print('running')
+        print(os.environ.get('VM_STATE', 'running'))
     elif 'dominfo' in args:
         if os.environ.get('VM_UNDEFINED'): sys.exit(1)
         print('Name: agent-xubuntu')
@@ -52,9 +53,7 @@ elif name == 'virsh':
     else:
         sys.exit(98)
 elif name == 'mount':
-    assert args[0] == '--bind', args
-    state['exports'][args[2]] = args[1]
-    save()
+    raise AssertionError('Project sharing must never create host mounts')
 elif name == 'umount':
     if os.environ.get('HOST_BUSY'): sys.exit(1)
     state['exports'].pop(args[-1], None)
@@ -147,7 +146,8 @@ class ProjectShareTests(unittest.TestCase):
         self.run_cli("attach", self.second)
         state = self.state()
         self.assertEqual(len(state["devices"]), 2)
-        self.assertEqual(set(state["exports"].values()), {str(self.first), str(self.second)})
+        self.assertEqual(state["exports"], {})
+        self.assertEqual(set(state["devices"].values()), {str(self.first), str(self.second)})
         self.assertEqual(len(state["guest"]), 2)
         for tag in state["devices"]:
             self.assertLessEqual(len(tag), 36)
@@ -158,7 +158,7 @@ class ProjectShareTests(unittest.TestCase):
         self.assertIn("Multiple projects", ambiguous.stderr)
         self.assertEqual(self.state(), state)
         self.run_cli("detach", "first project")
-        self.assertEqual(list(self.state()["exports"].values()), [str(self.second)])
+        self.assertEqual(list(self.state()["devices"].values()), [str(self.second)])
         self.assertEqual(len(self.state()["guest"]), 1)
         self.run_cli("detach")
         self.assertEqual(self.state(), {"exports": {}, "devices": {}, "guest": {}})
@@ -176,7 +176,7 @@ class ProjectShareTests(unittest.TestCase):
         self.run_cli("attach", other, "other-project")
         self.assertIn("/home/agent/workspace/other-project", self.state()["guest"])
         self.run_cli("detach", other)
-        self.assertEqual(list(self.state()["exports"].values()), [str(self.first)])
+        self.assertEqual(list(self.state()["devices"].values()), [str(self.first)])
         self.run_cli("detach", "--all")
         self.assertEqual(self.records(), [])
 
@@ -206,12 +206,17 @@ class ProjectShareTests(unittest.TestCase):
         self.run_cli("attach", self.second)
         self.assertEqual(self.state(), before)
 
-    def test_attach_restores_legacy_device_and_export_after_host_restart(self) -> None:
+    def test_old_share_requires_explicit_detach_and_reattach(self) -> None:
         self.make_legacy_share()
-        before = self.state()
         self.simulate_restart(host=True)
-        self.run_cli("attach", self.first)
+        before = self.state()
+        result = self.run_cli("attach", self.first, success=False)
+        self.assertIn("old host bind mount", result.stderr)
         self.assertEqual(self.state(), before)
+        self.run_cli("detach", self.first)
+        self.run_cli("attach", self.first)
+        self.assertEqual(list(self.state()["devices"].values()), [str(self.first)])
+        self.assertEqual(self.state()["exports"], {})
 
     def test_detach_cleans_records_after_restart(self) -> None:
         self.make_legacy_share()
@@ -258,7 +263,7 @@ class ProjectShareTests(unittest.TestCase):
         self.assertEqual(len(self.records()), 1)
 
     def test_host_unmount_failure_can_be_retried(self) -> None:
-        self.run_cli("attach", self.first)
+        self.make_staged_share()
         self.env["HOST_BUSY"] = "1"
         self.run_cli("detach", self.first, success=False)
         self.assertEqual(self.state()["devices"], {})
@@ -267,6 +272,81 @@ class ProjectShareTests(unittest.TestCase):
         self.run_cli("detach", self.first)
         self.assertEqual(self.state()["exports"], {})
         self.assertEqual(self.records(), [])
+
+    def make_staged_share(self) -> None:
+        self.run_cli("attach", self.first)
+        record = self.records()[0].parent
+        export = self.data / "share/current.d" / record.name
+        export.mkdir(parents=True)
+        (record / "export.path").write_text(str(export) + "\n")
+        xml_path = record / "device.xml"
+        root = ET.parse(xml_path).getroot()
+        source = root.find("source")
+        assert source is not None
+        source.set("dir", str(export))
+        ET.ElementTree(root).write(xml_path)
+        state = self.state()
+        tag = next(iter(state["devices"]))
+        state["devices"][tag] = str(export)
+        state["exports"][str(export)] = str(self.first)
+        self.statefile.write_text(json.dumps(state))
+
+    def test_staged_share_is_not_reused(self) -> None:
+        self.make_staged_share()
+        before = self.state()
+        self.run_cli("attach", self.first, success=False)
+        self.assertEqual(self.state(), before)
+        self.run_cli("detach", self.first)
+        self.run_cli("attach", self.first)
+        self.assertEqual(self.state()["exports"], {})
+
+    def test_attach_refuses_orphan_staging_mount(self) -> None:
+        self.make_staged_share()
+        shutil.rmtree(self.state_dir / "shares")
+        before = self.state()
+        result = self.run_cli("attach", self.first, success=False)
+        self.assertIn("Old bind mount remains", result.stderr)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.records(), [])
+
+    def test_detach_stopped_vm_needs_no_guest_access(self) -> None:
+        self.make_staged_share()
+        self.simulate_restart()
+        self.env["VM_STATE"] = "shut off"
+        self.env["GUEST_BUSY"] = "1"
+        self.env["INSPECT_FAIL"] = "1"
+        self.run_cli("detach", "--all")
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.state()["exports"], {})
+
+    def test_detach_refuses_vm_transition(self) -> None:
+        self.make_staged_share()
+        before = self.state()
+        self.env["VM_STATE"] = "in shutdown"
+        self.run_cli("detach", "--all", success=False)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_runtime_data_removal_preserves_project_files(self) -> None:
+        sentinel = self.first / "uncommitted.txt"
+        sentinel.write_text("irreplaceable work")
+        self.run_cli("attach", self.first)
+        record = self.records()[0].parent
+        self.assertEqual((record / "export.path").read_text().strip(), str(self.first))
+        source = ET.parse(record / "device.xml").find("source")
+        assert source is not None
+        self.assertEqual(source.get("dir"), str(self.first))
+        self.assertFalse((self.data / "share").exists())
+        shutil.rmtree(self.data)
+        self.assertEqual(sentinel.read_text(), "irreplaceable work")
+
+    def test_project_mountpoint_is_never_unmounted(self) -> None:
+        self.run_cli("attach", self.first)
+        state = self.state()
+        state["exports"][str(self.first)] = "/some/dedicated/project/filesystem"
+        self.statefile.write_text(json.dumps(state))
+        self.run_cli("detach", self.first)
+        self.assertEqual(self.state()["exports"], state["exports"])
 
     def make_legacy_share(self) -> None:
         export = str(self.data / "share/current")
@@ -292,7 +372,7 @@ class ProjectShareTests(unittest.TestCase):
         self.assertEqual(len(self.state()["devices"]), 2)
         self.run_cli("detach", self.first)
         self.assertFalse((self.state_dir / "current-share.path").exists())
-        self.assertEqual(list(self.state()["exports"].values()), [str(self.second)])
+        self.assertEqual(self.state()["exports"], {})
         self.run_cli("detach", "--all")
 
     def test_destroy_cleans_all_exports_and_tracking(self) -> None:

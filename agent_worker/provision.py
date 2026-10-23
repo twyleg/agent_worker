@@ -11,6 +11,7 @@ import shutil
 import signal
 import time
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -202,7 +203,8 @@ class Provisioner:
 
     def install(self, iso: Path) -> None:
         settings = self.settings
-        self.runner.run("sudo", "install", "-d", "-m", "0755", "--", settings.image_dir, settings.export_dir)
+        self.runner.run("sudo", "install", "-d", "-m", "0755", "--", settings.image_dir)
+        self.storage_access(iso)
         print(f"Installing '{settings.vm_name}'. Progress: sudo virsh console {settings.vm_name}", flush=True)
         self.runner.run(
             "sudo",
@@ -248,6 +250,35 @@ class Provisioner:
             "--wait=-1",
         )
         self.vm.virsh("start", settings.vm_name)
+
+    def storage_access(self, iso: Path) -> None:
+        """Allow the configured QEMU account to reach images in private paths."""
+        capabilities = ET.fromstring(self.vm.virsh("capabilities", readonly=True, capture=True).stdout)
+        label = capabilities.findtext("./host/secmodel[model='dac']/baselabel[@type='kvm']", default="")
+        identity = re.fullmatch(r"\+?(\d+):\+?(\d+)", label.strip())
+        if identity is None:
+            raise RuntimeError("Cannot determine QEMU's UID:GID from libvirt capabilities; cannot prepare storage permissions.")
+        uid, gid = identity.groups()
+
+        def accessible(flag: str, path: Path) -> bool:
+            return self.runner.run("sudo", "-u", f"#{uid}", "-g", f"#{gid}", "--", "test", flag, path, capture=True, check=False).returncode == 0
+
+        def grant(path: Path, permission: str, flag: str) -> None:
+            if accessible(flag, path):
+                return
+            print(f"Granting QEMU (UID {uid}) {permission} access to {path}", flush=True)
+            self.runner.run("sudo", "setfacl", "-m", f"u:{uid}:{permission}", "--", path)
+            if not accessible(flag, path):
+                raise RuntimeError(f"QEMU (UID:GID {uid}:{gid}) still cannot access {path} after setting its ACL.")
+
+        # Resolve symlinks and walk from root down so each access check can reach
+        # its target. Never grant listing/write access to parent directories or
+        # recurse into data/state, which contains private SSH keys and seeds.
+        directories = set(self.settings.disk_path.resolve().parents) | set(iso.resolve().parents)
+        for directory in sorted(directories, key=lambda path: (len(path.parts), str(path))):
+            grant(directory, "--x", "-x")
+        grant(iso.resolve(), "r--", "-r")
+        # Libvirt creates and labels the VM disk itself during virt-install.
 
     def wait(self) -> str:
         deadline = time.monotonic() + self.settings.ready_timeout

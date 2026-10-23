@@ -8,3 +8,4 @@ virtiofsd
 curl
 openssh
 openssl
+acl

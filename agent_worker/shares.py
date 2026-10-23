@@ -1,4 +1,4 @@
-"""Independent, recoverable virtiofs shares using the original tracking format."""
+"""Direct virtiofs exports with recoverable cleanup of old host bind mounts."""
 
 from __future__ import annotations
 
@@ -23,6 +23,12 @@ class Share:
     tag: str
     xml: Path
     legacy: bool = False
+
+    @property
+    def staged(self) -> bool:
+        # Compare recorded paths, not resolved symlinks: old staging paths must
+        # never be mistaken for a directly exported project.
+        return self.export != self.project
 
     def write_xml(self) -> None:
         fs = ET.Element("filesystem", type="mount", accessmode="passthrough")
@@ -129,10 +135,6 @@ class Shares:
         command = shlex.join(["sudo", "python3", "-", action, self.guest_path(share), share.tag, extra])
         self.vm.ssh(command, input=(GUEST_DIR / "project.py").read_text())
 
-    def stage(self, share: Share) -> None:
-        self.runner.run("sudo", "install", "-d", "-m", "0755", "--", share.export)
-        self.runner.run("sudo", "mount", "--bind", "--", share.project, share.export)
-
     def attach(self, project: str | Path, name: str | None = None) -> None:
         with file_lock(self.settings.state_dir / "project-shares.lock"):
             self.require_running()
@@ -148,9 +150,12 @@ class Shares:
                         raise RuntimeError(f"Project is already attached as '{share.name}'.")
                     if not share.legacy and (share.record / "device.detached").exists():
                         raise RuntimeError(f"Project detach is incomplete; finish detaching '{name}' before attaching again.")
+                    if share.staged:
+                        raise RuntimeError(
+                            f"Project '{name}' uses an old host bind mount. Run agent_worker project detach "
+                            f"{shlex.quote(name)}, then attach it again to use a direct export. Do not delete the staging directory."
+                        )
                     live = self.live_export(share)
-                    if not self.mounted(share.export):
-                        self.stage(share)
                     if live is None:
                         share.write_xml()
                         self.vm.virsh("attach-device", self.settings.vm_name, share.xml, "--live")
@@ -165,21 +170,17 @@ class Shares:
                 record,
                 project,
                 name,
-                Path(f"{self.settings.export_dir}.d") / identity,
+                project,
                 f"project-{identity[:28]}",
                 record / "device.xml",
             )
-            if self.mounted(share.export):
-                raise RuntimeError(f"{share.export} is already mounted; clean up the stale export first.")
+            old_export = Path(f"{self.settings.export_dir}.d") / identity
+            if self.mounted(old_export):
+                raise RuntimeError(f"Old bind mount remains at {old_export}; unmount it before attaching. Do not delete its contents.")
             share.save()
             try:
-                self.stage(share)
                 self.vm.virsh("attach-device", self.settings.vm_name, share.xml, "--live")
             except Exception:
-                (record / "device.detached").touch()
-                if self.mounted(share.export):
-                    # If rollback fails, preserve tracking so detach can recover it.
-                    self.runner.run("sudo", "umount", "--", share.export)
                 share.remove()
                 raise
             try:
@@ -192,7 +193,9 @@ class Shares:
 
     def detach(self, selector: str | None = None, all: bool = False) -> None:
         with file_lock(self.settings.state_dir / "project-shares.lock"):
-            self.require_running()
+            state = self.vm.virsh("domstate", self.settings.vm_name, readonly=True, capture=True).stdout.strip()
+            if state not in ("running", "shut off", "shutoff"):
+                raise RuntimeError("VM must be running or fully shut off before detaching projects.")
             records = self.records()
             if not records:
                 raise RuntimeError("No tracked project shares are attached.")
@@ -208,13 +211,14 @@ class Shares:
                     if len(records) > 1:
                         raise RuntimeError("Ambiguous project selector; use the full host path.")
             for share in records:
-                live = self.live_export(share)
-                self.guest(share, "unmount")
-                if live is not None:
-                    self.vm.virsh("detach-device", self.settings.vm_name, share.xml, "--live")
+                if state == "running":
+                    live = self.live_export(share)
+                    self.guest(share, "unmount")
+                    if live is not None:
+                        self.vm.virsh("detach-device", self.settings.vm_name, share.xml, "--live")
                 if not share.legacy:
                     (share.record / "device.detached").touch()
-                if self.mounted(share.export):
+                if share.staged and self.mounted(share.export):
                     self.runner.run("sudo", "umount", "--", share.export)
                 share.remove()
                 print(f"Detached: {share.project}")
@@ -226,7 +230,7 @@ class Shares:
             text = state.ljust(width)
             if not use_color:
                 return text
-            code = {"mounted": "32", "not mounted": "31", "unavailable": "33"}[state]
+            code = {"mounted": "32", "available": "32", "not mounted": "31", "unavailable": "33"}[state]
             return f"\033[{code}m{text}\033[0m"
 
         with file_lock(self.settings.state_dir / "project-shares.lock"):
@@ -238,10 +242,11 @@ class Shares:
             if not verbose:
                 print(f"{'PROJECT':<{name_width}}  {'HOST':<11}  {'GUEST':<11}  HOST PATH")
             for share in records:
-                host_mounted = self.mounted(share.export)
+                host_mounted = share.staged and self.mounted(share.export)
                 if verbose:
                     print(
-                        f"Project:       {share.name}\nHost project:  {share.project}\nStaging dir:   {share.export}"
+                        f"Project:       {share.name}\nHost project:  {share.project}\n"
+                        f"{'Staging dir:  ' if share.staged else 'Export dir:   '} {share.export}"
                         f"\nGuest path:    {self.guest_path(share)}"
                     )
                     if host_mounted:
@@ -261,19 +266,27 @@ class Shares:
                 if verbose:
                     print(f"Guest mount:   {highlight(guest_state)}")
                 else:
-                    host_state = "mounted" if host_mounted else "not mounted"
+                    host_state = ("mounted" if host_mounted else "not mounted") if share.staged else ("available" if share.project.is_dir() else "unavailable")
                     print(f"{share.name:<{name_width}}  {highlight(host_state, 11)}  {highlight(guest_state, 11)}  {share.project}")
 
     def cleanup(self) -> None:
         # Only call after domain removal, when no guest can access these exports.
-        for share in self.records():
-            self._unmount_stale(share.export)
+        records = self.records()
+        for share in records:
+            if share.staged:
+                self._unmount_stale(share.export)
             share.remove()
-        self._unmount_stale(self.settings.export_dir)
+        # Records may have been deleted while old host mounts survived. Inspect
+        # only the known staging locations, never recursively traverse exports.
+        projects = {share.project for share in records}
+        for path in [self.settings.export_dir, *Path(f"{self.settings.export_dir}.d").glob("*")]:
+            if path not in projects:
+                self._unmount_stale(path)
         for name in ("current-share.xml", "current-share.path"):
             (self.settings.state_dir / name).unlink(missing_ok=True)
 
     def _unmount_stale(self, path: Path) -> None:
         if self.mounted(path):
-            if self.runner.run("sudo", "umount", "--", path, check=False).returncode:
-                self.runner.run("sudo", "umount", "-l", "--", path)
+            # Do not hide busy mounts with a lazy unmount. Leave tracking intact
+            # when unmount fails so cleanup can be retried safely.
+            self.runner.run("sudo", "umount", "--", path)
