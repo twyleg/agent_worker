@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -214,3 +215,37 @@ def test_project_status_options(options: list[str], verbose: bool, color: str) -
         main(["project", "status", *options])
     assert exc.value.code == 0
     shares.return_value.status.assert_called_once_with(verbose, color)
+
+
+def test_upgrade_hands_off_to_pipx_without_loading_vm_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.chdir(tmp_path)
+    execute = Mock()
+    monkeypatch.setattr("agent_worker.main.os.execve", execute)
+    monkeypatch.setattr("agent_worker.main.shutil.which", lambda name, **kwargs: "/usr/bin/pipx")
+    monkeypatch.setattr(Application, "load_settings", Mock(side_effect=AssertionError("Upgrade must not inspect VM settings")))
+    assert Application().start(["upgrade"]) == 0  # execve is mocked; real execution never returns.
+    path, arguments, environment = execute.call_args.args
+    assert path == "/usr/bin/pipx"
+    assert arguments == ["/usr/bin/pipx", "upgrade", "agent-worker", "--pip-args=--no-cache-dir"]
+    assert environment["LC_ALL"] == "C"
+    assert "VM:" not in capsys.readouterr().err
+
+
+def test_upgrade_reports_missing_pipx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("agent_worker.main.shutil.which", lambda name, **kwargs: None)
+    assert Application().start(["upgrade"]) == 1
+    assert "pipx was not found on PATH" in capsys.readouterr().err
+
+
+def test_upgrade_replaces_process_and_preserves_pipx_exit_status(tmp_path: Path) -> None:
+    executable = tmp_path / "pipx"
+    arguments = tmp_path / "arguments"
+    executable.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$UPGRADE_ARGUMENTS_FILE"\nexit 7\n')
+    executable.chmod(0o755)
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ, PATH=str(tmp_path) + os.pathsep + os.environ.get("PATH", ""), PYTHONPATH=str(root), UPGRADE_ARGUMENTS_FILE=str(arguments))
+    result = subprocess.run([sys.executable, "-m", "agent_worker", "upgrade"], cwd=tmp_path, env=environment, text=True, capture_output=True)
+    assert result.returncode == 7, result.stderr
+    assert arguments.read_text().splitlines() == ["upgrade", "agent-worker", "--pip-args=--no-cache-dir"]
+    assert "VM:" not in result.stderr

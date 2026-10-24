@@ -40,6 +40,20 @@ python -m pip install -e .
 The main command is `agent_worker`; `python -m agent_worker` provides the same
 interface. Each action and subaction has `--help`.
 
+For an installation managed by pipx, upgrade the host application with:
+
+```bash
+agent_worker upgrade
+```
+
+This replaces the running command with
+`pipx upgrade agent-worker --pip-args=--no-cache-dir`, so the old application does
+not continue running while pipx replaces its package files. pipx uses the existing
+installation's package source. This command requires `pipx` on `PATH` and an
+existing pipx-managed `agent-worker` installation; it does not convert a pip or
+source-checkout installation to pipx. VM provisioning and guest services are not
+restarted by this command.
+
 ## Shell completion
 
 Completion covers subcommands, option names, fixed choices, directories and
@@ -442,6 +456,7 @@ Model selection through labels and GitHub webhooks are left for a later version.
 
 | Command | Purpose |
 | --- | --- |
+| `agent_worker upgrade` | Upgrade the host's pipx-managed application without pip caching |
 | `agent_worker vm create [--recreate]` | Unattended installation and first-boot provisioning |
 | `agent_worker vm start` | Boot the VM |
 | `agent_worker vm shutdown` | Request graceful shutdown |

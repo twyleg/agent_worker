@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,7 +19,7 @@ from agent_worker.github import GitHubWorkflow
 from agent_worker.provision import Provisioner
 from agent_worker.settings import RESOURCE_DIR, Settings
 from agent_worker.shares import Shares
-from agent_worker.system import CommandError
+from agent_worker.system import CommandError, host_environment
 from agent_worker.vm import VM
 
 
@@ -50,6 +51,7 @@ class Application(SubcommandApplication):
         self._setup_guest_commands()
         self._setup_github_commands()
         self._setup_completion_command()
+        self._setup_upgrade_command()
         argcomplete.autocomplete(parser)
 
     # The framework annotates handlers as returning int; run() also accepts void callbacks.
@@ -230,16 +232,38 @@ class Application(SubcommandApplication):
         completion.parser.add_argument("shell", choices=("bash", "zsh", "fish"))
         completion.parser.set_defaults(show_vm_context=False)
 
+    def _setup_upgrade_command(self) -> None:
+        upgrade = self.add_subcommand(
+            command="upgrade",
+            help="Upgrade the host's pipx-installed agent-worker package",
+            description="Hand off to pipx upgrade agent-worker --pip-args=--no-cache-dir.",
+            handler=cast(Command.Handler, lambda args: self.upgrade()),
+        )
+        upgrade.parser.set_defaults(requires_vm=False, show_vm_context=False)
+
+    @staticmethod
+    def upgrade() -> None:
+        environment = host_environment()
+        pipx = shutil.which("pipx", path=environment.get("PATH"))
+        if pipx is None:
+            raise RuntimeError("pipx was not found on PATH. Install pipx and use it to install agent-worker before running upgrade.")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # Replace this process before pipx replaces package files. Nothing in
+        # agent_worker needs to import, execute or clean up after the upgrade.
+        os.execve(pipx, [pipx, "upgrade", "agent-worker", "--pip-args=--no-cache-dir"], environment)
+
     def load_settings(self, args: argparse.Namespace) -> Settings:
         names = ("data_dir", "vm_name", "libvirt_uri", "resource_dir", "ram_mb", "vcpus", "disk_gb")
         return Settings.load(self.application_config, {name: getattr(args, name, None) for name in names})
 
     def run(self, args: argparse.Namespace) -> int:
         try:
-            settings = self.load_settings(args)
-            if getattr(args, "show_vm_context", True):
-                print(f"VM: {settings.vm_name} | Data: {settings.data_dir} | URI: {settings.libvirt_uri}", file=sys.stderr, flush=True)
-            self.vm = VM(settings)
+            if getattr(args, "requires_vm", True):
+                settings = self.load_settings(args)
+                if getattr(args, "show_vm_context", True):
+                    print(f"VM: {settings.vm_name} | Data: {settings.data_dir} | URI: {settings.libvirt_uri}", file=sys.stderr, flush=True)
+                self.vm = VM(settings)
             super().run(args)
             return 0
         except KeyboardInterrupt:
