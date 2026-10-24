@@ -155,7 +155,16 @@ class VM:
     def connect(self) -> None:
         payload = io.BytesIO()
         with tarfile.open(fileobj=payload, mode="w") as archive:
-            for name in ("workspace.py", "dashboard.py", "codex_usage.py", "configure_codex.py"):
+            for name in (
+                "workspace.py",
+                "dashboard.py",
+                "codex_usage.py",
+                "configure_codex.py",
+                "github_workflow.py",
+                "github_client.py",
+                "git_credential.py",
+                "github_review.py",
+            ):
                 archive.add(GUEST_DIR / name, arcname=name)
             for name in ("tmux.conf", "tmux.conf.local", "codex.config.toml"):
                 archive.add(self.settings.resource_dir / name, arcname=name)

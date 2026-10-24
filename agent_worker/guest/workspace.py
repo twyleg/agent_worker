@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import shlex
 import shutil
@@ -30,6 +31,47 @@ def run(*args: str, capture: bool = False, check: bool = True) -> subprocess.Com
         print(f"Failed command: {exc.cmd}", file=sys.stderr)
         print(f"STDERR: {exc.stderr}", file=sys.stderr, flush=True)
         raise
+
+
+def dashboard_version(helpers: Path) -> str:
+    return hashlib.sha256(
+        b"".join((helpers / name).read_bytes() for name in ("dashboard.py", "codex_usage.py", "github_workflow.py", "github_client.py", "github_review.py"))
+    ).hexdigest()
+
+
+def refresh_dashboards(target: str, helpers: Path) -> None:
+    """Reload only recognized dashboard panes when their installed code changes."""
+    panes = run(
+        "tmux",
+        "list-panes",
+        "-s",
+        "-t",
+        target,
+        "-F",
+        "#{pane_id}\t#{pane_start_command}\t#{pane_current_command}\t#{pane_current_path}\t#{@agent-worker-dashboard-version}",
+        capture=True,
+    )
+    version = dashboard_version(helpers)
+    for line in panes.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 5:
+            continue
+        pane, start, current, directory, installed = fields
+        try:
+            args = shlex.split(start)
+            # tmux can render a single shell command as one quoted argument.
+            if len(args) == 1:
+                args = shlex.split(args[0])
+        except ValueError:
+            continue
+        # Recognize old, untagged dashboards by the exact script path. Never
+        # respawn a shell or Codex pane that happens to occupy the same position.
+        if len(args) != 2 or Path(args[1]) != helpers / "dashboard.py" or not Path(args[0]).name.startswith("python"):
+            continue
+        if installed == version or not current.startswith("python"):
+            continue
+        run("tmux", "respawn-pane", "-k", "-t", pane, "-c", directory, shlex.join(["python3", str(helpers / "dashboard.py")]))
+        run("tmux", "set-option", "-p", "-t", pane, "@agent-worker-dashboard-version", version)
 
 
 def main() -> None:
@@ -95,6 +137,7 @@ def main() -> None:
                         shlex.join(["python3", str(helpers / "dashboard.py")]),
                         capture=True,
                     ).stdout.strip()
+                    run("tmux", "set-option", "-p", "-t", right, "@agent-worker-dashboard-version", dashboard_version(helpers))
                     run("tmux", "split-window", "-v", "-l", "40%", "-t", right, "-c", str(workdir))
                     run("tmux", "select-pane", "-t", left)
                     run(
@@ -111,6 +154,7 @@ def main() -> None:
                     run("tmux", "kill-session", "-t", f"={session}", check=False)
                     raise RuntimeError("Could not create the workspace; enlarge the terminal and reconnect.")
                 target = session
+        refresh_dashboards(target, helpers)
         run("tmux", "source-file", str(Path.home() / ".tmux.conf"))
         fcntl.flock(lock, fcntl.LOCK_UN)
     os.execlp("tmux", "tmux", "attach-session", "-t", target)

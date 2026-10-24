@@ -5,6 +5,7 @@ from __future__ import annotations
 import curses
 import datetime
 import math
+import json
 import os
 import shutil
 import textwrap
@@ -17,10 +18,14 @@ from typing import Any, Protocol
 
 if __package__:
     from .codex_usage import read_usage
+    from .github_workflow import request_poll
 else:
     from codex_usage import read_usage as standalone_read_usage
 
     read_usage = standalone_read_usage
+    from github_workflow import request_poll as standalone_request_poll
+
+    request_poll = standalone_request_poll
 
 INTERVAL = 10
 GREEN, RED, YELLOW, CYAN, MUTED = range(1, 6)
@@ -247,6 +252,33 @@ def palette() -> dict[int, int]:
     return colors
 
 
+def github_lines() -> list[tuple[str, int]]:
+    path = Path.home() / ".local/state/agent-worker/github/status.json"
+    if not path.exists():
+        return [("GITHUB | disabled", MUTED)]
+    try:
+        state = json.loads(path.read_text())
+        phase = state.get("state", "unknown")
+        if phase != "stopped" and time.time() - state.get("heartbeat", 0) > 30:
+            phase = "unavailable"
+        jobs = state.get("jobs", [])
+        counts = {name: sum(job["state"] == name for job in jobs) for name in ("queued", "waiting", "review", "failed")}
+        lines = [(f"GITHUB | {phase}", CYAN)]
+        if (path.parent / "poll-request").exists():
+            lines.append(("Manual poll queued", YELLOW))
+        if state.get("active"):
+            lines.append((state["active"], GREEN))
+        lines.append((f"Queued {counts['queued']} | Wait {counts['waiting']}", MUTED))
+        lines.append((f"Review {counts['review']} | Failed {counts['failed']}", YELLOW if counts["failed"] else MUTED))
+        lines.extend(
+            (f"Next {'review PR' if job.get('kind') == 'review' else 'issue'}: {job['repo']}#{job['issue']}", MUTED) for job in jobs if job["state"] == "queued"
+        )
+        lines.extend((error, YELLOW) for error in state.get("errors", {}).values())
+        return lines
+    except (OSError, ValueError, KeyError, TypeError):
+        return [("GITHUB | status unavailable", YELLOW)]
+
+
 def draw(
     screen: Screen,
     metrics: Sequence[Meter],
@@ -256,6 +288,7 @@ def draw(
     updated: str | None,
     colors: Mapping[int, int],
     scroll: int = 0,
+    notice: str = "",
 ) -> int:
     screen.erase()
     height, columns = screen.getmaxyx()
@@ -263,9 +296,10 @@ def draw(
     if width == 0 or height < 2:
         return 0
     clock = clock_lines(datetime.datetime.now(), width)
-    if height < 10:
+    if height < 20:
         clock = [datetime.datetime.now().strftime("%H:%M:%S").center(width)]
-    rows = []
+    # Keep workflow state and queue near the top even in compact panes.
+    rows = [[(line, color)] for text, color in github_lines() for line in textwrap.wrap(text, max(1, width))]
     load = " ".join(f"{value:.1f}" for value in os.getloadavg())
     heading = f"SYSTEM | {os.cpu_count()} cores | load {load}"
     if len(heading) > width:
@@ -304,9 +338,11 @@ def draw(
         write(row, [(text, YELLOW)], bold=True)
     for row, spans in enumerate(rows[scroll : scroll + available], start=len(clock)):
         write(row, spans)
-    footer = f"10s poll | {os.cpu_count()} CPUs"
+    footer = "[p] Poll now"
     if max_scroll:
-        footer = f"Up/Down scroll {scroll + 1}/{max_scroll + 1}"
+        footer += f" | j/k {scroll + 1}/{max_scroll + 1}"
+    if notice:
+        footer = notice
     write(height - 1, [(footer, MUTED)])
     screen.refresh()
     return scroll
@@ -326,6 +362,8 @@ def dashboard(screen: InteractiveScreen) -> None:
     system_error = ""
     next_poll = time.monotonic() + 1
     scroll = 0
+    notice = ""
+    notice_until = 0.0
     try:
         while True:
             now = time.monotonic()
@@ -339,11 +377,17 @@ def dashboard(screen: InteractiveScreen) -> None:
                     system_error = f"System unavailable: {error}"
                 next_poll = now + INTERVAL
             quotas, quota_error, updated = poller.snapshot()
-            scroll = draw(screen, metrics, system_error, quotas, quota_error, updated, colors, scroll)
+            scroll = draw(screen, metrics, system_error, quotas, quota_error, updated, colors, scroll, notice if now < notice_until else "")
             key = screen.getch()
             if key in (ord("q"), ord("Q")):
                 return
-            if key in (curses.KEY_DOWN, ord("j")):
+            if key in (ord("p"), ord("P")):
+                try:
+                    notice = request_poll()
+                except (OSError, RuntimeError, ValueError) as error:
+                    notice = str(error)
+                notice_until = time.monotonic() + 5
+            elif key in (curses.KEY_DOWN, ord("j")):
                 scroll += 1
             elif key in (curses.KEY_UP, ord("k")):
                 scroll = max(0, scroll - 1)

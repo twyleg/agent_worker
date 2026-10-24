@@ -14,6 +14,7 @@ from simple_python_app.subcommand_application import Command, SubcommandApplicat
 
 from agent_worker import __version__
 from agent_worker.completion import project_selectors
+from agent_worker.github import GitHubWorkflow
 from agent_worker.provision import Provisioner
 from agent_worker.settings import RESOURCE_DIR, Settings
 from agent_worker.shares import Shares
@@ -47,6 +48,7 @@ class Application(SubcommandApplication):
         self._setup_project_commands()
         self._setup_codex_commands()
         self._setup_guest_commands()
+        self._setup_github_commands()
         self._setup_completion_command()
         argcomplete.autocomplete(parser)
 
@@ -155,6 +157,59 @@ class Application(SubcommandApplication):
         )
         usage.parser.add_argument("--json", action="store_true")
 
+    def _setup_github_commands(self) -> None:
+        self.root_command.add_subcommand("github", help="Manage the GitHub workflow")
+        configure = self.add_subcommand(
+            command="github configure",
+            help="Install the opt-in GitHub worker in the guest",
+            description="Set the team identities, install the guest Python environment and user service; polling stays disabled.",
+            handler=cast(Command.Handler, lambda args: GitHubWorkflow(self.vm).configure(args.developer, args.manager, args.interval)),
+        )
+        configure.parser.add_argument("--developer", required=True, help="Machine account GitHub username")
+        configure.parser.add_argument("--manager", required=True, help="Your GitHub username and required reviewer")
+        configure.parser.add_argument("--interval", type=int, default=60, help="Poll interval in seconds (minimum 30)")
+        login = self.add_subcommand(
+            command="github login",
+            help="Save a GitHub token for the guest or host",
+            description="Validate and store a token using a hidden prompt; defaults to the guest machine account.",
+            handler=cast(Command.Handler, lambda args: GitHubWorkflow(self.vm).login(args.host, args.token_stdin)),
+        )
+        login.parser.add_argument("--host", action="store_true", help="Store the project manager's token on the host")
+        login.parser.add_argument("--token-stdin", action="store_true", help="Read the token from stdin instead of a hidden prompt")
+        add = self.add_subcommand(
+            command="github add",
+            help="Verify protection and register a repository",
+            description="Verify required manager approval using the host token, then accept the developer invitation and register in the guest.",
+            handler=cast(Command.Handler, lambda args: GitHubWorkflow(self.vm).add(args.repository, args.invite, args.developer)),
+        )
+        add.parser.add_argument("repository", help="OWNER/REPO")
+        add.parser.add_argument("--invite", action="store_true", help="Invite the machine account using the host token")
+        add.parser.add_argument("--developer", help="Machine account username for --invite")
+        for action, help_text in (
+            ("check", "Verify full repository protection using the host token"),
+            ("status", "Show workflow state and queue as JSON"),
+            ("start", "Enable polling now and at guest boot"),
+            ("stop", "Stop polling and disable automatic startup"),
+            ("restart-service", "Restart the guest GitHub workflow service"),
+            ("log", "Follow the guest GitHub workflow service journal"),
+            ("run", "Run the worker in the foreground"),
+            ("retry", "Retry a failed job"),
+            ("remove", "Unregister a repository"),
+        ):
+
+            def handle(args: argparse.Namespace, action: str = action) -> None:
+                GitHubWorkflow(self.vm).action(
+                    action, once=getattr(args, "once", False), job=getattr(args, "job", None), repository=getattr(args, "repository", None)
+                )
+
+            subcommand = self.add_subcommand(command=f"github {action}", help=help_text, description=help_text, handler=cast(Command.Handler, handle))
+            if action == "run":
+                subcommand.parser.add_argument("--once", action="store_true", help="Poll once and run at most one job")
+            elif action == "retry":
+                subcommand.parser.add_argument("job", type=int)
+            elif action == "remove":
+                subcommand.parser.add_argument("repository", help="OWNER/REPO")
+
     def _setup_guest_commands(self) -> None:
         self.root_command.add_subcommand("guest", help="Repair guest tooling (run inside the guest)")
         setup = self.add_subcommand(
@@ -183,7 +238,7 @@ class Application(SubcommandApplication):
         try:
             settings = self.load_settings(args)
             if getattr(args, "show_vm_context", True):
-                print(f"VM: {settings.vm_name} | Data: {settings.data_dir} | URI: {settings.libvirt_uri}\n", file=sys.stderr, flush=True)
+                print(f"VM: {settings.vm_name} | Data: {settings.data_dir} | URI: {settings.libvirt_uri}", file=sys.stderr, flush=True)
             self.vm = VM(settings)
             super().run(args)
             return 0

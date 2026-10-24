@@ -22,6 +22,7 @@ furo~=2024.8.6
 simple-python-app==0.4.1
 PyYAML~=6.0.2
 argcomplete~=3.7.2
+PyGithub~=2.10.0
 
 # template-project-utils is only needed to initialize a new project, in a separate environment.
 

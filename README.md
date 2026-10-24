@@ -90,7 +90,7 @@ so new commands and options appear after upgrades without regenerating your
 shell configuration. Remote arguments following `vm ssh` do not receive
 remote-shell completion.
 
-## Workflow
+## Local workflow
 
 ```bash
 agent_worker vm create
@@ -116,6 +116,327 @@ agent_worker vm shutdown
 
 Shutdown requests a graceful power-off and preserves the VM and disk. Check
 `vm status` for completion.
+
+## GitHub workflow
+
+The GitHub workflow adds a second, opt-in workflow alongside the local workflow.
+You are the project manager and use your personal GitHub account. The developer
+uses a separate machine account authenticated **inside the VM**. Issues and PRs
+hold the conversation and development history; you review and merge the work.
+
+The Python worker uses PyGithub and polls registered repositories every 60 seconds,
+queues open issues assigned to the developer, and runs one unattended `codex exec`
+turn at a time. Polling and queue management do not use AI. Manager replies on an
+issue, PR comments, inline review comments and submitted “Request changes” reviews
+queue another turn. Own replies and comments from other accounts do not trigger
+work. Approval alone does not trigger a turn.
+
+### Set up the accounts and repository
+
+Create the machine account on GitHub and authenticate Codex inside the VM using
+the existing local workflow. GitHub API operations use **PyGithub**, installed as
+an application dependency on the host and in a dedicated virtual environment in
+the guest. GitHub CLI is not required. Git itself still handles clone, commit and
+push operations.
+
+Create two personal access tokens, each under its own account:
+
+- **Host / project manager:** a fine-grained token limited to the selected
+  repositories, with Administration **read** for protection checks, Contents
+  **read** for CODEOWNERS and branches, and Metadata read. Inviting collaborators
+  with `--invite` additionally needs Administration **write** on the host token;
+  you can instead invite through GitHub's UI and keep the host token read-only.
+- **Guest / machine account:** for the personal-repository collaborator workflow,
+  use a **classic token** with `repo` scope (or `public_repo` if all repositories are
+  public). Add `workflow` if tasks need to push changes to GitHub Actions files.
+  Fine-grained tokens currently cannot contribute as a repository/outside
+  collaborator. The token cannot grant rights beyond the machine account's
+  actual repository permissions; keep that account as a write collaborator.
+
+See [GitHub's token documentation and collaborator limitations](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
+
+```bash
+# If upgrading an existing installation, first stop the worker:
+agent_worker github stop
+
+# This hidden token prompt runs locally; the manager token stays on the host:
+agent_worker github login --host
+
+# Installs/updates the guest Python environment; preserves registered repositories:
+agent_worker github configure --developer YOUR_MACHINE_ACCOUNT --manager YOUR_USERNAME
+
+# This hidden token prompt runs inside the VM as the machine account:
+agent_worker github login
+```
+
+On a fresh setup, omit `github stop`. Both login commands validate the token with
+GitHub before saving it; the guest also checks that it belongs to the configured
+developer. Host add/check commands enforce the configured manager identity.
+`github configure` installs a systemd user service and enables guest user lingering,
+but leaves polling disabled on a fresh setup. The guest environment lives at
+`~/.local/lib/agent-worker/github-venv`; host dependencies never need to be copied
+from the host Python installation into the VM.
+
+Tokens are stored separately on each machine at
+`${XDG_CONFIG_HOME:-~/.config}/agent-worker/github-token`, with mode `0600`. They are
+not part of the shared configuration JSON or job logs. Replace/renew a token by
+running the corresponding login command again. For automation, use
+`github login [--host] --token-stdin` to read a token from stdin without putting it
+in command arguments, or provide `AGENT_WORKER_GITHUB_TOKEN` in the relevant
+host/guest process environment. Environment tokens take precedence over saved
+tokens and are not automatically forwarded over SSH or installed into the guest
+service environment.
+
+The guest uses an ephemeral Git credential helper for github.com HTTPS operations.
+It reads the same developer token used by PyGithub, overrides old helpers for each
+Git process, and never embeds the token in repository URLs or persistent Git
+configuration. Existing `gh` credentials are not imported.
+
+Add the developer as a write collaborator in GitHub's Settings → Collaborators,
+or use `--invite` below. The developer must have write access, not administrator
+access. In each repository, put this as the **last noncomment rule** in the
+CODEOWNERS file on the default branch and any existing `main`/`master` branches:
+
+```text
+* @YOUR_USERNAME
+```
+
+GitHub checks `.github/CODEOWNERS`, then `CODEOWNERS`, then `docs/CODEOWNERS`, using
+only the first file found. Keeping the manager as the sole owner in the final
+catch-all rule makes approval by that specific person mandatory for every file.
+The manager needs write permission. Commit this setup yourself before onboarding.
+
+For the default branch and any existing `main`/`master`, configure **classic branch
+protection** in GitHub's Settings → Branches:
+
+- Require a pull request before merging, with at least one approval.
+- Require review from Code Owners.
+- Dismiss stale approvals when new commits are pushed.
+- Administrator bypass is allowed; “Do not allow bypassing” may remain unchecked.
+- Disable force pushes, branch deletion and PR bypass allowances.
+
+The application checks these settings; it does not replace existing protection,
+create CODEOWNERS, or change repository rules. Ruleset-only repositories are not
+yet supported by this verifier. GitHub Pro supports this for public and private
+repositories **owned by your personal account**; organization-owned private
+repositories need an appropriate organization plan.
+[GitHub branch protection documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
+and [code owner documentation](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners).
+
+```bash
+# After inviting the developer in the GitHub UI:
+agent_worker github add OWNER/REPO
+
+# Or send the invitation with your host token, then register:
+agent_worker github add OWNER/REPO --invite --developer YOUR_MACHINE_ACCOUNT
+
+agent_worker github check
+agent_worker github start
+```
+
+Adding the machine account as a collaborator in GitHub's web UI grants access but
+**does not register the repository with the worker**. Run `github add OWNER/REPO`
+for each project, including projects invited through the UI. The worker polls only
+that explicit list; it does not automatically scan every accessible repository.
+Each poll logs the registered repository names, and `github status` includes the
+running worker's repository list. Stop the worker before adding a project, then
+start it again to load the updated list.
+
+`github add` first uses the host's project-manager token to check all review
+settings, bypass restrictions and CODEOWNERS. Only after that succeeds does the
+guest accept any pending invitation for the selected repository, verify developer
+access and confirm that its default branch and existing `main`/`master` branches
+report as protected. `github check` repeats the full policy verification from the
+host for every registered repository. The VM must be reachable so the host can
+read the configured identities and repository list. No credentials are returned
+by this read or forwarded from the host to the guest.
+
+A missing or unreadable policy blocks registration. The guest uses only the machine
+account's token for polling, comments, Git operations and PRs. It does not inspect
+the administrative protection endpoint or store an owner policy token. The former
+`github protection-login` command has been removed. Updated guest helpers delete
+the old `~/.config/agent-worker/github-protection-token` file when invoked; an
+existing token can also be revoked on GitHub.
+
+When upgrading, stop the worker before configuring the new environment and tokens,
+then start it again after `github add` or `github check` succeeds. The repository
+list, queue, checkouts and completed task results are preserved.
+
+### Work on issues and review PRs
+
+Create an issue and assign it to the machine account. The worker clones into a
+separate guest directory, `~/workspace-github/OWNER/REPO/issue-N`, and works on
+`agent-worker/issue-N`. These checkouts are independent of host-mounted projects.
+If clarification is needed, it posts a question on the issue and waits for your
+reply. Otherwise it commits and pushes the feature branch, opens a PR linked with
+`Closes #N`, requests you as reviewer, and links the PR from the issue.
+
+Reply on the issue or PR, add inline review comments, or submit a review requesting
+changes to queue follow-up work on the same branch and PR. A published inline
+comment alone is sufficient; a “Request changes” review is not required. Pending
+review comments are private to their author: finish with **Submit review** (using
+Comment or Request changes) before expecting the machine account to see them.
+Poll logs report PR discussion, inline comment and submitted-review counts,
+including the number of inline comments from the configured manager. After approval, merge the PR yourself.
+The worker never merges PRs or directly pushes to the default branch.
+
+### Request a code review
+
+For a repository registered with `github add`, create a PR from your own branch
+and request the machine account as a reviewer in GitHub's **Reviewers** sidebar.
+No assigned issue is required for a review request. The worker polls open,
+non-draft PRs for direct requests to that account and adds a **review** task to
+the same persistent queue used by implementation tasks. It skips PRs authored by
+the machine account itself. The dashboard labels queued/active review work as PR
+reviews; completed review jobs have state `reviewed` in `github status`.
+
+Review tasks use a separate `~/workspace-github/OWNER/REPO/review-pr-N` checkout,
+fetch GitHub's PR head ref (including fork PRs), and run Codex with a read-only
+sandbox against the recorded base/head commits. They publish a **Comment** review
+with a summary and inline findings; they do not push fixes, approve or merge the
+PR. Findings that cannot be anchored to an actual changed line are retained in
+the review summary. The review records the exact commit SHA it inspected.
+
+The worker rechecks that the PR is open, the account is still requested, and the
+request event and base/head commits are unchanged before publication. Closing the
+PR or withdrawing the request cancels pending review work. Updated commits or a
+new request supersede the old queued result; changes after the final API check
+can still make a review outdated, but it remains pinned to its inspected commit.
+After a review is complete, use GitHub's **Re-request review** control for another
+pass. Request-event IDs distinguish re-requests even when the commit is unchanged,
+and a request left visible after a Comment review does not cause repeated reviews.
+Movement of the base branch alone also does not repeat a completed review.
+
+Existing reviews/comments are supplied as context. Completed Codex review output
+is retained under `runs/JOB_ID/review-result.json`; retries reuse it. Published
+reviews carry a marker so a retry after a lost response does not post duplicates.
+The existing guest machine-account token handles reviews with its `repo` scope;
+no manager token is copied to the VM. Deployment uses the normal helper refresh
+and `github restart-service`; the queue schema updates in place without removing
+existing jobs.
+
+### Runtime checks and status
+
+Implementation tasks recheck identity, assignment and the observable protected flag for
+its default branch and existing `main`/`master` branches before starting a task
+and again before publication. It blocks work if a branch is unprotected or its
+status is unavailable. This lightweight check cannot detect changes to individual
+approval settings while a branch still reports as protected. Run the host's
+`agent_worker github check` to revalidate those settings and CODEOWNERS. Closing an issue, removing the assignment, or
+closing its PR stops subsequent publication. New manager feedback arriving during
+a run queues an updated turn before publication. GitHub changes and the final push
+are separate API operations, so these checks cannot eliminate every concurrent
+change between the final check and publication; GitHub enforces branch protection.
+
+The workspace's top-right dashboard shows GitHub activity, queued issues, questions
+waiting for your answer, PRs awaiting review and failures alongside system and
+Codex usage. The queue summary stays near the top in compact panes; use Up/Down
+or j/k in the dashboard for longer lists. Reconnect with `vm connect` to upload
+updated helpers. Reconnecting automatically reloads a recognized dashboard pane
+when its installed code has changed, including dashboards created before version
+tracking existed. Codex and shell panes, pane IDs, layout and working directories
+are preserved; an unchanged dashboard is not restarted.
+
+The footer's **[p] Poll now** control requests an extra GitHub poll. Click the
+top-right pane to focus it and press `p` (or `P`). An idle worker notices the local
+request within approximately one second. This leaves the configured automatic
+interval unchanged, starts no extra worker and coalesces repeated presses into
+one pending poll. During an active task, the poll waits until that task finishes;
+it never interrupts Codex. GitHub rate-limit cooldowns also take precedence.
+
+The dashboard confirms the request and shows **Manual poll queued** while it is
+pending. If the service is stopped or unavailable, it asks you to start it; if an
+older worker is still running, it asks for a restart to enable the control. The
+worker logs when it accepts a manual request. After updating, use `vm connect`
+to reload the dashboard and restart the worker between tasks to enable manual
+polling.
+
+
+```bash
+agent_worker github status              # JSON: activity, job IDs, queue and errors
+agent_worker github stop                # stop current work and disable boot startup
+agent_worker github restart-service     # restart the existing guest service
+agent_worker github log                 # follow its journal; Ctrl-C stops following
+agent_worker github run --once          # poll once and execute at most one job
+agent_worker github retry JOB_ID        # requeue a failed job while stopped
+agent_worker github start
+
+# Unregister a repository (does not revoke its GitHub collaborator access):
+agent_worker github stop
+agent_worker github remove OWNER/REPO
+agent_worker github start
+```
+
+Stop the service before changing configuration, registering/removing repositories,
+retrying jobs, or running the worker in the foreground. `github start` enables it
+at subsequent VM boots; `github stop` disables that startup. Shutdown of the VM
+also stops work. Interrupted tasks are requeued at startup, with checkouts and
+completed Codex results retained. Failed tasks stay failed until explicitly retried
+or new manager feedback queues an updated task; publication retries reuse the
+completed result and existing PR. Replies have persistent markers to prevent
+repeat comments after a lost response. Git pushes are fast-forward only; divergent
+branches need manual resolution. A Codex turn has a two-hour timeout.
+
+Guest state lives under `~/.local/state/agent-worker/github/`: `queue.sqlite3`,
+`status.json`, and `runs/JOB_ID/` containing the prompt, result and Codex log.
+Configuration is `~/.config/agent-worker/github.json`.
+
+The worker logs startup/shutdown, every poll and its duration, assigned issue counts
+per repository, new/updated versus unchanged work, queue totals, blocked repository
+checks, task transitions and failures. Task logs identify cloning/synchronization,
+Codex start/end (and the detailed output path), result reuse, pre-publication
+checks, questions awaiting a reply, commits, pushes, PR creation/update and reviewer
+requests. A long-running task emits an activity message once a minute. Polling is
+serial with task execution: the next poll happens after the active task finishes
+and the configured interval elapses.
+
+There is no lifetime limit on the number of polls. GitHub normally allows 5,000
+authenticated REST requests per hour per user, shared across that user's tokens
+and other API clients, plus secondary burst/content limits. A poll makes multiple
+API requests, and pagination or more issues/PRs increases that count. The default
+60-second interval suits small installations; it is not a guarantee for arbitrary
+repository counts. GitHub Pro does not increase the normal PAT request budget.
+
+The worker logs the remaining request budget reported by GitHub and includes
+`rate_limit` and `rate_limited_until` in `github status`. When GitHub rate-limits a
+request, it stops the poll and delays subsequent API access according to
+`Retry-After` and the reset timestamp, with a minimum one-minute exponential
+backoff for successive secondary limits. A job interrupted by rate limiting stays
+queued, retaining its checkout and completed Codex result. Other permission errors
+remain errors rather than being treated as rate limits. Quota/backoff is tracked
+in the running process; restarting the service resets that local tracking.
+[GitHub rate-limit documentation](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+
+Timestamped INFO/ERROR messages go immediately to stderr (captured by the systemd
+journal) and to `~/.local/state/agent-worker/github/workflow.log`. This operational
+log rotates at 5 MiB, keeping three backups. Log messages use IDs, counts and
+stages; issue/PR text and full Codex output are kept in the separate job artifacts.
+
+```bash
+# Recent service events, or follow them live:
+agent_worker vm ssh 'journalctl --user -u agent-worker-github.service -n 100 --no-pager'
+agent_worker github log
+
+# The same operational log is available for foreground runs:
+agent_worker vm ssh 'tail -f ~/.local/state/agent-worker/github/workflow.log'
+
+# Detailed model output for a job shown by github status:
+agent_worker vm ssh 'tail -f ~/.local/state/agent-worker/github/runs/JOB_ID/codex.log'
+```
+
+To load logging changes into an already-running worker, upload the updated helpers
+with `vm connect` (or `github check`), then restart the service. Restarting interrupts
+an active task; its retained job is requeued at startup. Prefer restarting between
+tasks:
+
+```bash
+agent_worker github restart-service
+```
+
+Repository allowlisting, manager-only follow-up triggers and GitHub protection
+provide the workflow boundaries. Codex retains the VM's existing full-access mode;
+this is not an isolation boundary between jobs or from other VM credentials.
+Model selection through labels and GitHub webhooks are left for a later version.
 
 ## Commands
 
@@ -591,6 +912,5 @@ are omitted as the template directs; VM examples and docs replace demo content.
 
 The package separates `main.py` (actions/configuration), `settings.py`, `system.py`
 (commands, locks and sudo), `vm.py` (lifecycle/SSH), `shares.py`, `provision.py`,
-standalone `guest/` helpers and packaged `resources/`. The GitHub machine-account
-issue/branch/PR workflow is a future extension; this migration covers the existing
-VM functionality.
+standalone `guest/` helpers and packaged `resources/`. `github.py` manages the
+opt-in GitHub workflow through the standalone `guest/github_workflow.py` worker.

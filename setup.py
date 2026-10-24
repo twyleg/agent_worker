@@ -38,6 +38,7 @@ setup(
         "simple-python-app==0.4.1",
         "PyYAML~=6.0.2",
         "argcomplete~=3.7.2",
+        "PyGithub~=2.10.0",
     ],
     entry_points={
         "console_scripts": [

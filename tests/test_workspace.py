@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from agent_worker.guest import dashboard
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,6 +117,31 @@ class DashboardTests(unittest.TestCase):
                 actual = dashboard.draw(screen, [dashboard.Meter("RAM", 50, "1.0/2.0G")], "", quotas, "", "12:00:00", {}, scroll)
                 self.assertGreaterEqual(actual, 0)
 
+    def test_compact_dashboard_shows_queue_without_scrolling(self) -> None:
+        from unittest.mock import patch
+
+        class Screen:
+            def __init__(self) -> None:
+                self.text: list[str] = []
+
+            def erase(self) -> None:
+                pass
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return 12, 23
+
+            def addstr(self, row: int, column: int, text: str, attr: int) -> None:
+                self.text.append(text)
+
+            def refresh(self) -> None:
+                pass
+
+        screen = Screen()
+        with patch.object(dashboard, "github_lines", return_value=[("GITHUB | idle", dashboard.CYAN), ("Queued 2 | Wait 1", dashboard.MUTED)]):
+            dashboard.draw(screen, [dashboard.Meter("CPU", 50)], "", [], "", None, {})
+        self.assertIn("GITHUB | idle", screen.text)
+        self.assertIn("Queued 2 | Wait 1", screen.text)
+
 
 class ConnectionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -188,6 +215,10 @@ if '-t' not in sys.argv:
                     "tmux.conf",
                     "tmux.conf.local",
                     "configure_codex.py",
+                    "github_workflow.py",
+                    "github_client.py",
+                    "git_credential.py",
+                    "github_review.py",
                     "codex.config.toml",
                 },
             )
@@ -303,6 +334,34 @@ else:
         self.assertEqual(self.tmux_run("show-options", "-gv", "status-bg").stdout.strip(), "colour123")
         self.assertEqual(self.panes(), panes)
 
+    def test_reconnect_refreshes_only_outdated_dashboard(self) -> None:
+        self.connect()
+        layout = self.panes()
+        ids = [line.split("|")[0] for line in layout]
+
+        def pids() -> list[str]:
+            return self.tmux_run("list-panes", "-t", "agent-workspace", "-F", "#{pane_pid}").stdout.splitlines()
+
+        before = pids()
+        # Simulate a dashboard started before version tracking existed.
+        self.tmux_run("set-option", "-p", "-u", "-t", ids[1], "@agent-worker-dashboard-version")
+        self.connect()
+        after = pids()
+        self.assertEqual(after[0], before[0])
+        self.assertNotEqual(after[1], before[1])
+        self.assertEqual(after[2], before[2])
+        self.assertEqual(self.panes(), layout)
+        self.connect()
+        self.assertEqual(pids(), after)
+        with (self.helpers / "dashboard.py").open("a") as stream:
+            stream.write("\n# Installed dashboard update\n")
+        self.connect()
+        updated = pids()
+        self.assertNotEqual(updated[1], after[1])
+        self.assertEqual(updated[0], after[0])
+        self.assertEqual(updated[2], after[2])
+        self.assertEqual(self.panes(), layout)
+
     def test_attaches_existing_user_session(self) -> None:
         self.tmux_run("new-session", "-d", "-s", "existing", "-x", "160", "-y", "40")
         target = self.connect().stdout.strip()
@@ -313,3 +372,23 @@ else:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.parametrize("problem", [False, True])
+def test_dashboard_poll_key_shows_confirmation_or_error(monkeypatch: pytest.MonkeyPatch, problem: bool) -> None:
+    from unittest.mock import Mock
+
+    screen = Mock()
+    screen.getch.side_effect = [ord("p"), ord("q")]
+    poller = Mock()
+    poller.snapshot.return_value = ([], "", None)
+    monkeypatch.setattr(dashboard, "UsagePoller", lambda: poller)
+    monkeypatch.setattr(dashboard, "palette", lambda: {})
+    monkeypatch.setattr(dashboard.curses, "curs_set", lambda value: None)
+    render = Mock(return_value=0)
+    monkeypatch.setattr(dashboard, "draw", render)
+    trigger = Mock(side_effect=RuntimeError("Start the GitHub worker first")) if problem else Mock(return_value="Poll requested")
+    monkeypatch.setattr(dashboard, "request_poll", trigger)
+    dashboard.dashboard(screen)
+    trigger.assert_called_once_with()
+    assert render.call_args.args[-1] == ("Start the GitHub worker first" if problem else "Poll requested")
